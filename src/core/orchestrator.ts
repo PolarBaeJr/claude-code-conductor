@@ -45,6 +45,7 @@ import {
   MAX_DISAGREEMENT_ROUNDS,
   DEFAULT_WORKER_POLL_INTERVAL_MS,
   WIND_DOWN_GRACE_PERIOD_MS,
+  DEFAULT_WORKER_TIMEOUT_MS,
 } from "../utils/constants.js";
 
 import { Logger } from "../utils/logger.js";
@@ -115,6 +116,9 @@ export class Orchestrator {
   private git: GitManager;
   private logger: Logger;
   private options: CLIOptions;
+
+  // V2: Structured event logging
+  private eventLog: EventLog;
 
   // Stores the Q&A context gathered during initialization
   private qaContext: string = "";
@@ -223,6 +227,9 @@ export class Orchestrator {
         );
 
     this.flowTracer = new FlowTracer(options.project, this.logger);
+
+    // V2: Initialize event logging
+    this.eventLog = new EventLog(options.project);
   }
 
   // ================================================================
@@ -230,6 +237,9 @@ export class Orchestrator {
   // ================================================================
 
   async run(): Promise<void> {
+    // V2: Start event logging
+    this.eventLog.start();
+
     try {
       await this.initialize();
 
@@ -488,6 +498,9 @@ export class Orchestrator {
         // Best effort
       }
       throw err;
+    } finally {
+      // V2: Stop event logging and flush remaining events
+      await this.eventLog.stop();
     }
   }
 
@@ -496,6 +509,9 @@ export class Orchestrator {
   // ================================================================
 
   private async initialize(): Promise<void> {
+    const initStartTime = Date.now();
+    recordPhaseStart(this.eventLog, "initialize");
+
     this.logger.info("Initializing conductor...");
     await logProgress(this.options.project, "initializing", "Creating directory structure");
 
@@ -686,6 +702,12 @@ export class Orchestrator {
     // Set up Codex MCP config so Codex can access the coordination server
     await this.setupCodexMcpConfig();
 
+    // V2: Record phase completion and project detection
+    recordPhaseEnd(this.eventLog, "initialize", initStartTime);
+    if (this.projectProfile) {
+      recordProjectDetection(this.eventLog, this.projectProfile);
+    }
+
     this.logger.info("Initialization complete.");
   }
 
@@ -799,6 +821,9 @@ export class Orchestrator {
   // ================================================================
 
   private async plan(planVersion: number, isReplan: boolean): Promise<number> {
+    const planStartTime = Date.now();
+    recordPhaseStart(this.eventLog, "planning");
+
     await this.state.setStatus("planning");
     await this.state.setProgress(`Planning: generating plan v${planVersion}...`);
     await logProgress(this.options.project, "planning", `Generating plan v${planVersion} (replan=${isReplan})`);
@@ -1079,6 +1104,10 @@ export class Orchestrator {
     }
 
     this.logger.info(`Created ${planOutput.tasks.length} task(s) from plan.`);
+
+    // V2: Record planning phase completion
+    recordPhaseEnd(this.eventLog, "planning", planStartTime);
+
     return planVersion;
   }
 
@@ -1087,6 +1116,9 @@ export class Orchestrator {
   // ================================================================
 
   private async execute(): Promise<void> {
+    const executeStartTime = Date.now();
+    recordPhaseStart(this.eventLog, "executing");
+
     await this.state.setStatus("executing");
     await this.state.setProgress("Executing: preparing workers...");
     await logProgress(this.options.project, "executing", "Preparing workers");
@@ -1139,6 +1171,8 @@ export class Orchestrator {
         const sessionId = `worker-${Date.now()}-${i}`;
         await this.workers.spawnWorker(sessionId);
         await this.state.addActiveSession(sessionId);
+        // V2: Record worker spawn event
+        recordWorkerSpawn(this.eventLog, sessionId);
       }
 
       // Spawn security sentinel (runs in parallel with workers)
@@ -1178,6 +1212,9 @@ export class Orchestrator {
         // Check usage
         if (this.usageCritical) {
           this.logger.warn("Usage critical. Signaling workers to wind down...");
+          // V2: Record usage warning event (five_hour field is 0.0-1.0 utilization)
+          const utilization = usageMonitor.getUsage().five_hour ?? 0.95;
+          recordUsageWarning(this.eventLog, utilization);
           await this.workers.signalWindDown("usage_limit", this.usageCriticalResetsAt);
           await this.workers.waitForAllWorkers(WIND_DOWN_GRACE_PERIOD_MS);
           break;
@@ -1185,6 +1222,9 @@ export class Orchestrator {
 
         if (usageMonitor.isWindDownNeeded()) {
           this.logger.warn("Usage threshold reached. Signaling wind-down...");
+          // V2: Record usage warning event (five_hour field is 0.0-1.0 utilization)
+          const utilization = usageMonitor.getUsage().five_hour ?? 0.8;
+          recordUsageWarning(this.eventLog, utilization);
           const resetTime = usageMonitor.getResetTime();
           await this.workers.signalWindDown("usage_limit", resetTime ?? undefined);
           await this.workers.waitForAllWorkers(WIND_DOWN_GRACE_PERIOD_MS);
@@ -1208,6 +1248,9 @@ export class Orchestrator {
         for (const sessionId of timedOut) {
           this.logger.warn(`Worker ${sessionId} timed out after wall-clock timeout`);
 
+          // V2: Record worker timeout event (workers exceeded the timeout threshold)
+          recordWorkerTimeout(this.eventLog, sessionId, DEFAULT_WORKER_TIMEOUT_MS);
+
           // Check for partial commits
           const hasPartialWork = await this.checkForPartialCommits(sessionId);
           if (hasPartialWork) {
@@ -1227,6 +1270,8 @@ export class Orchestrator {
         // Handle stale workers (no heartbeat)
         for (const sessionId of stale) {
           this.logger.warn(`Worker ${sessionId} has no heartbeat - considering stalled`);
+          // V2: Record worker failure event for stale workers
+          recordWorkerFail(this.eventLog, sessionId, "Worker stalled (no heartbeat activity)");
           const currentTask = await this.getWorkerCurrentTask(sessionId);
           if (currentTask && retryTracker) {
             retryTracker.recordFailure(currentTask.id, "Worker stalled (no activity)");
@@ -1268,6 +1313,8 @@ export class Orchestrator {
             const sessionId = `worker-${Date.now()}-respawn-${i}`;
             await this.workers.spawnWorker(sessionId);
             await this.state.addActiveSession(sessionId);
+            // V2: Record worker spawn event
+            recordWorkerSpawn(this.eventLog, sessionId);
           }
           await this.syncTrackedActiveSessions();
         } else if (activeWorkers.length === 0 && pendingNow.length === 0) {
@@ -1293,6 +1340,9 @@ export class Orchestrator {
       // Update usage snapshot in state
       await this.persistProviderUsage(this.options.workerRuntime, usageMonitor.getUsage());
       await this.syncTrackedActiveSessions();
+
+      // V2: Record execution phase completion
+      recordPhaseEnd(this.eventLog, "executing", executeStartTime);
     }
   }
 
@@ -1301,6 +1351,9 @@ export class Orchestrator {
   // ================================================================
 
   private async review(): Promise<boolean> {
+    const reviewStartTime = Date.now();
+    recordPhaseStart(this.eventLog, "reviewing");
+
     await this.state.setStatus("reviewing");
     await this.state.setProgress("Reviewing: checking code changes...");
     await logProgress(this.options.project, "reviewing", "Starting Codex code review");
@@ -1309,6 +1362,7 @@ export class Orchestrator {
     if (this.options.skipCodex) {
       this.logger.info("Codex review skipped (--skip-codex).");
       this.lastCodeReviewRounds = 0;
+      recordPhaseEnd(this.eventLog, "reviewing", reviewStartTime);
       return true;
     }
 
@@ -1509,6 +1563,10 @@ export class Orchestrator {
       );
     }
 
+    // V2: Record review phase completion and verdict
+    recordPhaseEnd(this.eventLog, "reviewing", reviewStartTime);
+    recordReviewVerdict(this.eventLog, reviewResult.verdict);
+
     return approved;
   }
 
@@ -1528,8 +1586,12 @@ export class Orchestrator {
    * - Edge cases in actor type transitions (e.g., role changes mid-session)
    */
   private async flowReview(cycle: number): Promise<FlowTracingReport | null> {
+    const flowStartTime = Date.now();
+    recordPhaseStart(this.eventLog, "flow_tracing");
+
     if (this.options.skipFlowReview) {
       this.logger.info("Flow-tracing review skipped (--skip-flow-review).");
+      recordPhaseEnd(this.eventLog, "flow_tracing", flowStartTime);
       return null;
     }
 
@@ -1548,17 +1610,20 @@ export class Orchestrator {
       this.logger.warn(
         `Could not get git diff for flow-tracing: ${err instanceof Error ? err.message : String(err)}`,
       );
+      recordPhaseEnd(this.eventLog, "flow_tracing", flowStartTime);
       return null;
     }
 
     if (!diff || diff.trim().length === 0) {
       this.logger.info("No code changes to flow-trace.");
+      recordPhaseEnd(this.eventLog, "flow_tracing", flowStartTime);
       return null;
     }
 
     try {
       const canTraceFlows = await this.ensureProviderCapacity("claude", "flow tracing");
       if (!canTraceFlows) {
+        recordPhaseEnd(this.eventLog, "flow_tracing", flowStartTime);
         return null;
       }
       const report = await this.flowTracer.trace(changedFiles, diff, cycle);
@@ -1575,11 +1640,13 @@ export class Orchestrator {
         this.logger.info("Flow-tracing: no issues found.");
       }
 
+      recordPhaseEnd(this.eventLog, "flow_tracing", flowStartTime);
       return report;
     } catch (err) {
       this.logger.error(
         `Flow-tracing failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      recordPhaseEnd(this.eventLog, "flow_tracing", flowStartTime);
       return null;
     }
   }
