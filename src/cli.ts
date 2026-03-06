@@ -6,6 +6,7 @@ import { Command, InvalidArgumentError } from "commander";
 import chalk from "chalk";
 
 import { Orchestrator } from "./core/orchestrator.js";
+import { EventLog } from "./core/event-log.js";
 import type { CLIOptions, OrchestratorState, Task, UsageSnapshot, WorkerRuntime } from "./utils/types.js";
 import {
   getStatePath,
@@ -291,6 +292,56 @@ program
         }
       }
       console.log("");
+    }
+
+    // Event analytics
+    try {
+      const eventLog = new EventLog(projectDir);
+      const analytics = await eventLog.getAnalytics();
+
+      // Only show if there are events
+      if (analytics.total_events > 0) {
+        console.log(chalk.bold("  Event Analytics:"));
+
+        // Phase durations
+        if (Object.keys(analytics.phase_durations).length > 0) {
+          console.log(chalk.white("    Average Phase Durations:"));
+          for (const [phase, stats] of Object.entries(analytics.phase_durations)) {
+            const avgSec = Math.round(stats.avg_ms / 1000);
+            console.log(chalk.gray(`      ${phase}: ${avgSec}s avg (${stats.count} runs)`));
+          }
+        }
+
+        // Worker success rate
+        if (analytics.total_workers > 0) {
+          const successColor = analytics.worker_success_rate >= 80 ? chalk.green : chalk.yellow;
+          console.log(
+            chalk.white("    Worker Success Rate: ") +
+            successColor(`${analytics.worker_success_rate}%`)
+          );
+        }
+
+        // Task retry rate - only show if > 0
+        if (analytics.task_retry_rate > 0) {
+          console.log(
+            chalk.white("    Task Retry Rate: ") +
+            chalk.yellow(`${analytics.task_retry_rate}%`)
+          );
+        }
+
+        // Top bottleneck tasks (top 3)
+        if (analytics.top_bottleneck_tasks.length > 0) {
+          console.log(chalk.white("    Top Bottleneck Tasks:"));
+          for (const task of analytics.top_bottleneck_tasks.slice(0, 3)) {
+            const durationMin = Math.round(task.duration_ms / 60000);
+            console.log(chalk.gray(`      ${task.task_id}: ${durationMin}m`));
+          }
+        }
+
+        console.log("");
+      }
+    } catch {
+      // Event log may not exist yet - that's fine
     }
 
     // Task details
