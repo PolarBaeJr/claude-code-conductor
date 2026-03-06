@@ -310,6 +310,7 @@ export class CodexWorkerManager implements ExecutionWorkerManager {
         }, true);
         stderrBuffer = this.consumeLines(stderrBuffer, (line) => {
           if (line.trim().length > 0) {
+            this.maybeRecordRateLimit(handle, sessionId, line);
             this.logger.debug(`Codex worker ${sessionId} stderr: ${line}`);
           }
         }, true);
