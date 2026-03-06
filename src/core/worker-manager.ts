@@ -4,11 +4,11 @@ import path from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 import type {
+  ExecutionWorkerManager,
   OrchestratorEvent,
   Message,
   SessionStatus,
-  ProjectConventions,
-  ThreatModel,
+  WorkerSharedContext,
 } from "../utils/types.js";
 import {
   WORKER_ALLOWED_TOOLS,
@@ -20,7 +20,9 @@ import {
   FLOW_TRACING_READ_ONLY_TOOLS,
 } from "../utils/constants.js";
 import { getWorkerPrompt } from "../worker-prompt.js";
+import { getSentinelPrompt } from "../sentinel-prompt.js";
 import type { Logger } from "../utils/logger.js";
+import { coerceLogText, detectProviderRateLimit } from "../utils/provider-limit.js";
 
 // ============================================================
 // Worker Handle
@@ -31,6 +33,7 @@ interface WorkerHandle {
   promise: Promise<void>;
   events: OrchestratorEvent[];
   startedAt: string;
+  rateLimitReported: boolean;
 }
 
 // ============================================================
@@ -42,16 +45,11 @@ interface WorkerHandle {
  * sessions via the Agent SDK. Each worker runs as a background
  * async task that picks up tasks from the coordination server.
  */
-export class WorkerManager {
+export class WorkerManager implements ExecutionWorkerManager {
   private activeWorkers: Map<string, WorkerHandle> = new Map();
+  private pendingEvents: OrchestratorEvent[] = [];
 
-  private workerContext: {
-    qaContext?: string;
-    conventions?: ProjectConventions;
-    projectRules?: string;
-    featureDescription?: string;
-    threatModelSummary?: string;
-  } = {};
+  private workerContext: WorkerSharedContext = {};
 
   constructor(
     private projectDir: string,
@@ -68,13 +66,7 @@ export class WorkerManager {
    * Set shared context that will be injected into all worker prompts.
    * Call this after planning/conventions extraction, before spawning workers.
    */
-  setWorkerContext(context: {
-    qaContext?: string;
-    conventions?: ProjectConventions;
-    projectRules?: string;
-    featureDescription?: string;
-    threatModelSummary?: string;
-  }): void {
+  setWorkerContext(context: WorkerSharedContext): void {
     this.workerContext = context;
   }
 
@@ -121,6 +113,7 @@ export class WorkerManager {
       promise: Promise.resolve(), // will be replaced below
       events: [],
       startedAt: new Date().toISOString(),
+      rateLimitReported: false,
     };
 
     // Launch the worker as a background async task
@@ -173,6 +166,7 @@ export class WorkerManager {
       promise: Promise.resolve(),
       events: [],
       startedAt: new Date().toISOString(),
+      rateLimitReported: false,
     };
 
     // Launch with read-only tools and sentinel prompt
@@ -310,13 +304,9 @@ export class WorkerManager {
    * Get combined events from all workers (past and present).
    */
   getWorkerEvents(): OrchestratorEvent[] {
-    const allEvents: OrchestratorEvent[] = [];
-
-    for (const handle of this.activeWorkers.values()) {
-      allEvents.push(...handle.events);
-    }
-
-    return allEvents;
+    const events = [...this.pendingEvents];
+    this.pendingEvents = [];
+    return events;
   }
 
   // ----------------------------------------------------------------
@@ -361,7 +351,7 @@ export class WorkerManager {
 
       // Worker completed normally
       this.logger.info(`Worker ${sessionId} completed successfully.`);
-      handle.events.push({
+      this.recordEvent(handle, {
         type: "session_done",
         sessionId,
       });
@@ -372,7 +362,8 @@ export class WorkerManager {
         err instanceof Error ? err.message : String(err);
       this.logger.error(`Worker ${sessionId} failed: ${errorMessage}`);
 
-      handle.events.push({
+      this.maybeRecordRateLimit(handle, sessionId, errorMessage);
+      this.recordEvent(handle, {
         type: "session_failed",
         sessionId,
         error: errorMessage,
@@ -426,7 +417,7 @@ export class WorkerManager {
 
       // Sentinel completed normally
       this.logger.info(`Security sentinel ${sessionId} completed.`);
-      handle.events.push({
+      this.recordEvent(handle, {
         type: "session_done",
         sessionId,
       });
@@ -437,7 +428,8 @@ export class WorkerManager {
         err instanceof Error ? err.message : String(err);
       this.logger.error(`Security sentinel ${sessionId} failed: ${errorMessage}`);
 
-      handle.events.push({
+      this.maybeRecordRateLimit(handle, sessionId, errorMessage);
+      this.recordEvent(handle, {
         type: "session_failed",
         sessionId,
         error: errorMessage,
@@ -464,18 +456,14 @@ export class WorkerManager {
     const eventType = event.type as string | undefined;
 
     if (eventType === "result") {
-      const resultText =
-        typeof event.result === "string"
-          ? event.result
-          : JSON.stringify(event.result);
+      const resultText = coerceLogText(event.result);
+      this.maybeRecordRateLimit(handle, sessionId, resultText);
       this.logger.debug(`Worker ${sessionId} result: ${resultText.substring(0, 200)}`);
     } else if (eventType === "error") {
-      const errorText =
-        typeof event.error === "string"
-          ? event.error
-          : JSON.stringify(event.error);
+      const errorText = coerceLogText(event.error);
       this.logger.error(`Worker ${sessionId} error event: ${errorText}`);
-      handle.events.push({
+      this.maybeRecordRateLimit(handle, sessionId, errorText);
+      this.recordEvent(handle, {
         type: "session_failed",
         sessionId,
         error: errorText,
@@ -485,6 +473,36 @@ export class WorkerManager {
       const toolName = event.tool_name ?? event.name ?? "unknown";
       this.logger.debug(`Worker ${sessionId} using tool: ${String(toolName)}`);
     }
+  }
+
+  private recordEvent(handle: WorkerHandle, event: OrchestratorEvent): void {
+    handle.events.push(event);
+    this.pendingEvents.push(event);
+  }
+
+  private maybeRecordRateLimit(
+    handle: WorkerHandle,
+    sessionId: string,
+    detail: string,
+  ): void {
+    if (handle.rateLimitReported) {
+      return;
+    }
+
+    const signal = detectProviderRateLimit("claude", detail);
+    if (!signal) {
+      return;
+    }
+
+    handle.rateLimitReported = true;
+    this.logger.warn(`Claude worker ${sessionId} hit a usage limit: ${signal.detail}`);
+    this.recordEvent(handle, {
+      type: "provider_rate_limited",
+      sessionId,
+      provider: signal.provider,
+      detail: signal.detail,
+      resets_at: signal.resetsAt,
+    });
   }
 
   // ----------------------------------------------------------------
@@ -551,121 +569,13 @@ export class WorkerManager {
   private buildWorkerPrompt(sessionId: string): string {
     return getWorkerPrompt({
       sessionId,
+      runtime: "claude",
       ...this.workerContext,
     });
   }
 
-  /**
-   * Build the system prompt for the security sentinel worker.
-   * The sentinel is READ-ONLY and monitors completed tasks for security issues.
-   */
-  private buildSentinelPrompt(): string {
-    const securityInvariants = this.workerContext.conventions?.security_invariants;
-    const invariantsSection = securityInvariants && securityInvariants.length > 0
-      ? [
-          "",
-          "## Project Security Invariants",
-          "",
-          "The following security invariants have been established for this project.",
-          "Flag any violations of these as HIGH or CRITICAL severity:",
-          "",
-          ...securityInvariants.map((inv) => `- ${inv}`),
-        ].join("\n")
-      : "";
 
-    return [
-      "# Security Sentinel Worker",
-      "",
-      "You are a READ-ONLY security sentinel in a multi-agent conductor system.",
-      "Your session ID is: sentinel-security",
-      "",
-      "## IMPORTANT: You are READ-ONLY",
-      "",
-      "You must NEVER write, edit, or modify any files. You have only read access.",
-      "Your sole purpose is to monitor completed tasks and scan for security issues.",
-      "",
-      "## Your Mission",
-      "",
-      "Continuously monitor the `.conductor/tasks/` directory for newly completed tasks.",
-      "When you detect a completed task, read the files it changed and scan for security issues.",
-      "",
-      "## Workflow",
-      "",
-      "1. Call `mcp__coordinator__get_tasks` to see all tasks and their statuses.",
-      "2. For each task with status \"completed\", check if you have already reviewed it",
-      "   (keep a mental list of reviewed task IDs).",
-      "3. For newly completed tasks, read the `files_changed` list from the task data.",
-      "4. Read each changed file and scan for security issues (see checklist below).",
-      "5. If you find issues, report them via `mcp__coordinator__post_update` with:",
-      "   - type: \"broadcast\"",
-      "   - content: A structured report including severity, file path, line number if possible,",
-      "     and a description of the security issue.",
-      "6. Call `mcp__coordinator__read_updates` to check for wind_down messages.",
-      "7. If you receive a `wind_down` message, post a final summary of all findings and exit.",
-      "8. Wait briefly, then repeat from step 1.",
-      "",
-      "## Security Scan Checklist",
-      "",
-      "Scan every changed file for the following categories of issues:",
-      "",
-      "### Authentication & Authorization",
-      "- Missing auth middleware on route handlers or API endpoints",
-      "- Endpoints that accept user input but don't verify the caller's identity",
-      "- Missing role/permission checks on sensitive operations",
-      "",
-      "### Injection & Input Handling",
-      "- Raw SQL queries or string concatenation in database queries (SQL injection risk)",
-      "- Unsanitized user input passed to shell commands, file paths, or templates",
-      "- Missing input validation on API endpoints (no schema validation, no type checks)",
-      "",
-      "### Secrets & Credentials",
-      "- Hardcoded API keys, passwords, tokens, or connection strings",
-      "- Secrets logged to console or written to files",
-      "- Credentials in configuration files that should use environment variables",
-      "",
-      "### Network & CORS",
-      "- Overly permissive CORS configuration (e.g., `origin: '*'` on authenticated endpoints)",
-      "- Missing HTTPS enforcement or insecure cookie settings",
-      "",
-      "### Rate Limiting & DoS",
-      "- Missing rate limiting on mutation endpoints (POST, PUT, DELETE)",
-      "- Unbounded queries or operations that could be abused for DoS",
-      "- Missing pagination on list endpoints",
-      "",
-      "### Data Exposure",
-      "- Sensitive data returned in API responses that shouldn't be exposed",
-      "- Verbose error messages that leak internal details",
-      "- Missing field filtering on database query results",
-      "",
-      "## Severity Levels",
-      "",
-      "- **CRITICAL**: Immediately exploitable vulnerability (e.g., SQL injection, hardcoded secrets,",
-      "  unauthenticated admin endpoints)",
-      "- **HIGH**: Significant security gap that needs addressing before deployment (e.g., missing auth",
-      "  on sensitive routes, CORS misconfiguration on authenticated APIs)",
-      "- **MEDIUM**: Security best practice violation that should be addressed (e.g., missing rate",
-      "  limiting, missing input validation on non-sensitive endpoints)",
-      "- **LOW**: Minor improvement suggestion (e.g., could add additional logging, consider CSP headers)",
-      "",
-      "## Reporting Format",
-      "",
-      "When posting findings via `post_update`, use this format in the content:",
-      "",
-      "```",
-      "SECURITY FINDING: [SEVERITY]",
-      "Task: [task-id]",
-      "File: [file-path]",
-      "Line: [line-number or range]",
-      "Issue: [brief description]",
-      "Detail: [explanation of the vulnerability and potential impact]",
-      "Recommendation: [suggested fix]",
-      "```",
-      "",
-      "## Continuous Operation",
-      "",
-      "Keep polling for new completed tasks. Do not exit until you receive a wind_down message.",
-      "When polling, space out your checks -- do not spam the coordinator with rapid requests.",
-      invariantsSection,
-    ].join("\n");
+  private buildSentinelPrompt(): string {
+    return getSentinelPrompt(this.workerContext.conventions?.security_invariants);
   }
 }
