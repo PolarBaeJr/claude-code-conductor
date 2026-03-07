@@ -538,7 +538,8 @@ export class CodexWorkerManager implements ExecutionWorkerManager {
         updated_at: new Date().toISOString(),
       };
 
-      await fs.writeFile(statusPath, JSON.stringify(status, null, 2) + "\n", "utf-8");
+      // Use secure permissions: mode 0o600 for file (owner rw only)
+      await fs.writeFile(statusPath, JSON.stringify(status, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
     } catch (err) {
       this.logger.error(
         `Failed to update session status for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,

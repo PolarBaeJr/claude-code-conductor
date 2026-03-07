@@ -24,6 +24,7 @@ import {
 import { getFlowWorkerPrompt } from "../flow-worker-prompt.js";
 import { loadFlowConfig } from "../utils/flow-config.js";
 import type { Logger } from "../utils/logger.js";
+import { mkdirSecure, writeFileSecure } from "../utils/secure-fs.js";
 
 // ============================================================
 // FlowTracer
@@ -64,9 +65,9 @@ export class FlowTracer {
     // Load project-specific flow config (or generic defaults)
     const config = await loadFlowConfig(this.projectDir);
 
-    // Ensure flow-tracing directory exists
+    // Ensure flow-tracing directory exists with secure permissions
     const flowDir = getFlowTracingDir(this.projectDir);
-    await fs.mkdir(flowDir, { recursive: true });
+    await mkdirSecure(flowDir, { recursive: true });
 
     // Step 1: Extract flows from the diff
     this.logger.info("Flow-tracing: extracting user flows from changes...");
@@ -82,9 +83,9 @@ export class FlowTracer {
       this.logger.info(`  - ${flow.id}: ${flow.name} (${flow.actors.length} actors, ${flow.entry_points.length} entry points)`);
     }
 
-    // Step 2: Save flow specs for reference
+    // Step 2: Save flow specs for reference with secure permissions
     const flowSpecsPath = path.join(flowDir, `flows-cycle-${cycle}.json`);
-    await fs.writeFile(flowSpecsPath, JSON.stringify(flows, null, 2) + "\n", "utf-8");
+    await fs.writeFile(flowSpecsPath, JSON.stringify(flows, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
 
     // Step 3: Trace flows in parallel (bounded concurrency) with overall timeout
     this.logger.info(`Flow-tracing: spawning workers (max ${MAX_FLOW_TRACING_WORKERS} concurrent)...`);
@@ -121,14 +122,14 @@ export class FlowTracer {
       `Flow-tracing: ${allFindings.length} raw finding(s), ${deduplicated.length} after deduplication.`,
     );
 
-    // Step 5: Build and save report
+    // Step 5: Build and save report with secure permissions
     const report = this.buildReport(deduplicated, flows.length, startTime);
     const reportPath = getFlowTracingReportPath(this.projectDir, cycle);
-    await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", "utf-8");
+    await fs.writeFile(reportPath, JSON.stringify(report, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
 
-    // Also write a human-readable summary
+    // Also write a human-readable summary with secure permissions
     const summaryPath = path.join(flowDir, `summary-cycle-${cycle}.md`);
-    await fs.writeFile(summaryPath, this.formatReportMarkdown(report, flows), "utf-8");
+    await fs.writeFile(summaryPath, this.formatReportMarkdown(report, flows), { encoding: "utf-8", mode: 0o600 });
 
     this.logger.info(`Flow-tracing report saved to: ${reportPath}`);
     this.logger.info(`Flow-tracing summary saved to: ${summaryPath}`);
@@ -305,10 +306,10 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
       `flow-tracing-${flow.id}`,
     );
 
-    // Save raw output for debugging
+    // Save raw output for debugging with secure permissions
     const flowDir = getFlowTracingDir(this.projectDir);
     const rawPath = path.join(flowDir, `raw-${flow.id}.md`);
-    await fs.writeFile(rawPath, resultText, "utf-8");
+    await fs.writeFile(rawPath, resultText, { encoding: "utf-8", mode: 0o600 });
 
     return this.parseFlowFindings(resultText, flow.id);
   }
@@ -474,10 +475,12 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
     };
   }
 
+  // TODO(dead-code): startTime parameter is unused. Was likely intended for timing metrics.
+  // Consider adding duration_ms to FlowTracingReport or removing parameter.
   private buildReport(
     findings: FlowFinding[],
     flowsTraced: number,
-    startTime: number,
+    _startTime: number,
   ): FlowTracingReport {
     const summary = {
       critical: findings.filter((f) => f.severity === "critical").length,

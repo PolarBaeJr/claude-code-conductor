@@ -75,6 +75,8 @@ export async function extractConventions(projectDir: string): Promise<ProjectCon
   }
 
   // Spawn read-only agent to extract conventions
+  // Note: resultText initialization to "" is not needed since it's always reassigned in try block
+  // or function returns early in catch. ESLint flags this as useless assignment.
   let resultText = "";
 
   try {
@@ -92,10 +94,12 @@ export async function extractConventions(projectDir: string): Promise<ProjectCon
   // Parse the JSON output from the agent's response
   const conventions = parseConventionsOutput(resultText);
 
-  // Ensure the directory exists and save cache
+  // Ensure the directory exists and save cache with secure permissions
   try {
-    await fs.mkdir(path.dirname(conventionsPath), { recursive: true });
-    await fs.writeFile(conventionsPath, JSON.stringify(conventions, null, 2), "utf-8");
+    // Use mode 0o700 for directory (owner rwx only)
+    await fs.mkdir(path.dirname(conventionsPath), { recursive: true, mode: 0o700 });
+    // Use mode 0o600 for file (owner rw only)
+    await fs.writeFile(conventionsPath, JSON.stringify(conventions, null, 2), { encoding: "utf-8", mode: 0o600 });
   } catch (error) {
     console.warn("Failed to cache conventions:", error);
   }

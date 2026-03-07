@@ -3,6 +3,8 @@ import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+// TODO(dead-code): CodexJsonResponse is imported but never used. It's defined in types.ts
+// for potential structured response parsing but parseStructuredResponse uses dynamic parsing instead.
 import type { CodexReviewResult, CodexVerdict, CodexJsonResponse, CodexUsageMetrics } from "../utils/types.js";
 import { getCodexReviewsDir } from "../utils/constants.js";
 import type { Logger } from "../utils/logger.js";
@@ -63,6 +65,8 @@ export class CodexExecutionError extends Error {
 
 export class CodexReviewer {
   private projectDir: string;
+  private orchestratorDir: string;
+  private mcpServerPath: string;
   private logger: Logger;
   private metrics: CodexUsageMetrics = {
     invocations: 0,
@@ -72,8 +76,15 @@ export class CodexReviewer {
     last_presumed_rate_limit_at: null,
   };
 
-  constructor(projectDir: string, logger: Logger) {
+  constructor(
+    projectDir: string,
+    orchestratorDir: string,
+    mcpServerPath: string,
+    logger: Logger,
+  ) {
     this.projectDir = projectDir;
+    this.orchestratorDir = orchestratorDir;
+    this.mcpServerPath = mcpServerPath;
     this.logger = logger;
   }
 
@@ -340,10 +351,20 @@ export class CodexReviewer {
 
     // Use --full-auto for non-interactive review
     // No --sandbox since Codex needs MCP tool access (MCP tools are read-only anyway)
+    // Configure the coordinator MCP server so review prompts can access
+    // get_tasks, get_contracts, get_decisions, and read_updates tools.
     const args: string[] = [
       "exec",
       "--full-auto",
       "-C", this.projectDir,
+      "-c", 'mcp_servers.coordinator.command="node"',
+      "-c", `mcp_servers.coordinator.args=[${JSON.stringify(this.mcpServerPath)}]`,
+      "-c", `mcp_servers.coordinator.env.CONDUCTOR_DIR=${JSON.stringify(this.orchestratorDir)}`,
+      "-c", 'mcp_servers.coordinator.env.SESSION_ID="codex-reviewer"',
+      "-c", "mcp_servers.coordinator.startup_timeout_sec=10",
+      "-c", "mcp_servers.coordinator.tool_timeout_sec=30",
+      "-c", "mcp_servers.coordinator.enabled=true",
+      "-c", "mcp_servers.coordinator.required=false",
       fullPrompt,
     ];
 
@@ -535,7 +556,8 @@ export class CodexReviewer {
     ].join("\n");
 
     try {
-      await fs.writeFile(filePath, content, "utf-8");
+      // Use secure permissions: mode 0o600 for file (owner rw only)
+      await fs.writeFile(filePath, content, { encoding: "utf-8", mode: 0o600 });
       this.logger.info(`Saved review to ${filePath}`);
     } catch (err) {
       this.logger.error(`Failed to save review to ${filePath}: ${String(err)}`);

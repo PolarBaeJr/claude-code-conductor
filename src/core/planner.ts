@@ -10,6 +10,7 @@ import { getPlanPath, getTasksDraftPath, getOrchestratorDir, PLANNER_ALLOWED_TOO
 import type { Logger } from "../utils/logger.js";
 import { queryWithTimeout } from "../utils/sdk-timeout.js";
 import { validateTaskArray } from "../utils/task-validator.js";
+import { writeFileSecure } from "../utils/secure-fs.js";
 
 // ============================================================
 // Planner
@@ -160,9 +161,9 @@ export class Planner {
     // Read tasks from the dedicated JSON file (authoritative source)
     const tasks = await this.readAndValidateTasksDraft();
 
-    // Write the plan markdown to disk
+    // Write the plan markdown to disk with secure permissions
     const planPath = getPlanPath(this.projectDir, planVersion);
-    await fs.writeFile(planPath, planOutput, "utf-8");
+    await writeFileSecure(planPath, planOutput);
     this.logger.info(`Plan written to ${planPath} (${tasks.length} task(s))`);
 
     return {
@@ -238,7 +239,8 @@ export class Planner {
     const tasks = await this.readAndValidateTasksDraft();
 
     const planPath = getPlanPath(this.projectDir, planVersion);
-    await fs.writeFile(planPath, planOutput, "utf-8");
+    // Use secure permissions: writeFileSecure calls chmod after write
+    await writeFileSecure(planPath, planOutput);
     this.logger.info(`Replan written to ${planPath} (${tasks.length} task(s))`);
 
     return {
@@ -570,6 +572,10 @@ export class Planner {
   // Private: Parse task definitions from plan output
   // ----------------------------------------------------------------
 
+  // TODO(dead-code): parseTaskDefinitions and helper methods (extractJsonArray, extractJsonObject,
+  // tryParseTaskArray, validateTaskDefinition) are no longer used since the planner now writes
+  // task definitions to a dedicated JSON file (tasks-draft.json) and uses readAndValidateTasksDraft().
+  // Kept for potential fallback or backward compatibility. Consider removing in future cleanup.
   /**
    * Extract the JSON task definitions block from the plan output.
    *

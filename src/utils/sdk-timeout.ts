@@ -57,8 +57,10 @@ export async function queryWithTimeout(
     return resultText;
   })();
 
+  let timerId: ReturnType<typeof setTimeout>;
+
   const timeoutPromise = new Promise<string>((resolve) => {
-    setTimeout(() => {
+    timerId = setTimeout(() => {
       timedOut = true;
       console.warn(
         `[sdk-timeout] ${label} timed out after ${Math.round(timeoutMs / 1000)}s. ` +
@@ -68,5 +70,14 @@ export async function queryWithTimeout(
     }, timeoutMs);
   });
 
-  return Promise.race([queryPromise, timeoutPromise]);
+  try {
+    const result = await Promise.race([queryPromise, timeoutPromise]);
+    return result;
+  } finally {
+    // Always clear the timer, whether the race resolved or rejected.
+    clearTimeout(timerId!);
+    // If timeout won the race, the queryPromise may still reject later.
+    // Attach a no-op catch to prevent unhandled promise rejection crash.
+    queryPromise.catch(() => {});
+  }
 }
