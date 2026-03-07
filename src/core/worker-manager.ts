@@ -401,7 +401,23 @@ export class WorkerManager implements ExecutionWorkerManager {
       });
 
       for await (const event of asyncIterable) {
-        this.processWorkerEvent(sessionId, handle, event);
+        try {
+          this.processWorkerEvent(sessionId, handle, event);
+        } catch (err) {
+          // Log error and record failure event, but continue processing
+          // to avoid dropping subsequent events from the SDK stream
+          const errorMessage =
+            err instanceof Error ? err.message : String(err);
+          this.logger.error(
+            `Worker ${sessionId} event processing error: ${errorMessage}`
+          );
+          this.recordEvent(handle, {
+            type: "session_failed",
+            sessionId,
+            error: `Event processing error: ${errorMessage}`,
+          });
+          // Continue processing other events - don't break the loop
+        }
       }
 
       // Worker completed normally
@@ -471,7 +487,23 @@ export class WorkerManager implements ExecutionWorkerManager {
       });
 
       for await (const event of asyncIterable) {
-        this.processWorkerEvent(sessionId, handle, event);
+        try {
+          this.processWorkerEvent(sessionId, handle, event);
+        } catch (err) {
+          // Log error and record failure event, but continue processing
+          // to avoid dropping subsequent events from the SDK stream
+          const errorMessage =
+            err instanceof Error ? err.message : String(err);
+          this.logger.error(
+            `Sentinel ${sessionId} event processing error: ${errorMessage}`
+          );
+          this.recordEvent(handle, {
+            type: "session_failed",
+            sessionId,
+            error: `Event processing error: ${errorMessage}`,
+          });
+          // Continue processing other events - don't break the loop
+        }
       }
 
       // Sentinel completed normally
