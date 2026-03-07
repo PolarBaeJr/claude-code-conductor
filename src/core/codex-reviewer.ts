@@ -535,7 +535,8 @@ export class CodexReviewer {
     ].join("\n");
 
     try {
-      await fs.writeFile(filePath, content, "utf-8");
+      // Use secure permissions: mode 0o600 for file (owner rw only)
+      await fs.writeFile(filePath, content, { encoding: "utf-8", mode: 0o600 });
       this.logger.info(`Saved review to ${filePath}`);
     } catch (err) {
       this.logger.error(`Failed to save review to ${filePath}: ${String(err)}`);

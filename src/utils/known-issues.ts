@@ -23,8 +23,10 @@ export async function loadKnownIssues(projectDir: string): Promise<KnownIssue[]>
  */
 export async function saveKnownIssues(projectDir: string, issues: KnownIssue[]): Promise<void> {
   const issuesPath = getKnownIssuesPath(projectDir);
-  await fs.mkdir(path.dirname(issuesPath), { recursive: true });
-  await fs.writeFile(issuesPath, JSON.stringify(issues, null, 2), "utf-8");
+  // Use secure permissions: mode 0o700 for directory (owner rwx only)
+  await fs.mkdir(path.dirname(issuesPath), { recursive: true, mode: 0o700 });
+  // Use secure permissions: mode 0o600 for file (owner rw only)
+  await fs.writeFile(issuesPath, JSON.stringify(issues, null, 2), { encoding: "utf-8", mode: 0o600 });
 }
 
 /**
