@@ -22,6 +22,7 @@ import {
   DECISIONS_FILE,
 } from "../utils/constants.js";
 import { rankClaimableTasks, type RankedTask } from "../core/task-scheduler.js";
+import { validateFileName, validateFileNames } from "../utils/validation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -449,6 +450,18 @@ export interface CompleteTaskResult {
 export async function handleCompleteTask(
   input: CompleteTaskInput
 ): Promise<CompleteTaskResult> {
+  // Validate files_changed entries to prevent path traversal (#14)
+  if (input.files_changed && input.files_changed.length > 0) {
+    const failures = validateFileNames(input.files_changed);
+    if (failures.length > 0) {
+      const failureDetails = failures.map(f => `  - "${f.filename}": ${f.reason}`).join("\n");
+      return {
+        success: false,
+        error: `Invalid files_changed entries:\n${failureDetails}`,
+      };
+    }
+  }
+
   const dir = tasksDir();
   await ensureDir(dir);
 
@@ -568,7 +581,13 @@ export interface RegisterContractInput {
 
 export async function handleRegisterContract(
   input: RegisterContractInput
-): Promise<ContractSpec> {
+): Promise<ContractSpec | { error: string }> {
+  // Validate contract_id to prevent path traversal (#14)
+  const validation = validateFileName(input.contract_id);
+  if (!validation.valid) {
+    return { error: `Invalid contract_id: ${validation.reason}` };
+  }
+
   const dir = contractsDir();
   await ensureDir(dir);
 
