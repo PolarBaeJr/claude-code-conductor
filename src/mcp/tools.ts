@@ -126,7 +126,7 @@ function getProjectDir(): string {
  * Ensure a directory exists, creating it and parents if necessary.
  */
 async function ensureDir(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 }
 
 /**
@@ -259,7 +259,31 @@ export async function handlePostUpdate(
   }
 
   const filePath = path.join(dir, `${sessionId}.jsonl`);
-  await fs.appendFile(filePath, JSON.stringify(message) + "\n", "utf-8");
+
+  // Ensure file exists before locking (proper-lockfile requirement)
+  try {
+    await fs.access(filePath);
+  } catch {
+    await fs.writeFile(filePath, "", { encoding: "utf-8", mode: 0o600 });
+  }
+
+  // Lock file to prevent interleaved writes from concurrent workers (#17)
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lock(filePath, {
+      retries: { retries: 5, minTimeout: 100 },
+      stale: 5000,
+    });
+    await fs.appendFile(filePath, JSON.stringify(message) + "\n", "utf-8");
+  } finally {
+    if (release) {
+      try {
+        await release();
+      } catch {
+        // Lock may already be released
+      }
+    }
+  }
 
   return message;
 }
@@ -389,7 +413,7 @@ export async function handleClaimTask(
     task.owner = sessionId;
     task.started_at = new Date().toISOString();
 
-    await fs.writeFile(taskPath, JSON.stringify(task, null, 2), "utf-8");
+    await fs.writeFile(taskPath, JSON.stringify(task, null, 2), { encoding: "utf-8", mode: 0o600 });
 
     // Gather dependency context
     const dependency_context: { task_id: string; result_summary: string | null; files_changed: string[] }[] = [];
@@ -561,7 +585,7 @@ export async function handleCompleteTask(
       task.files_changed = input.files_changed;
     }
 
-    await fs.writeFile(taskPath, JSON.stringify(task, null, 2), "utf-8");
+    await fs.writeFile(taskPath, JSON.stringify(task, null, 2), { encoding: "utf-8", mode: 0o600 });
 
     // Post a task_completed message to the orchestrator message log
     const msgDir = messagesDir();
@@ -669,7 +693,7 @@ export async function handleRegisterContract(
   };
 
   const filePath = path.join(dir, `${input.contract_id}.json`);
-  await fs.writeFile(filePath, JSON.stringify(contract, null, 2), "utf-8");
+  await fs.writeFile(filePath, JSON.stringify(contract, null, 2), { encoding: "utf-8", mode: 0o600 });
 
   return contract;
 }
@@ -755,7 +779,30 @@ export async function handleRecordDecision(
     timestamp: new Date().toISOString(),
   };
 
-  await fs.appendFile(filePath, JSON.stringify(record) + "\n", "utf-8");
+  // Ensure file exists before locking (proper-lockfile requirement)
+  try {
+    await fs.access(filePath);
+  } catch {
+    await fs.writeFile(filePath, "", { encoding: "utf-8", mode: 0o600 });
+  }
+
+  // Lock file to prevent interleaved writes from concurrent workers (#17)
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lock(filePath, {
+      retries: { retries: 5, minTimeout: 100 },
+      stale: 5000,
+    });
+    await fs.appendFile(filePath, JSON.stringify(record) + "\n", "utf-8");
+  } finally {
+    if (release) {
+      try {
+        await release();
+      } catch {
+        // Lock may already be released
+      }
+    }
+  }
 
   return record;
 }
