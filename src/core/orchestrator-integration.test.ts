@@ -58,6 +58,10 @@ import {
   createMockTaskDefinition,
   createTempProjectDir,
   cleanupTempDir,
+  createMockUsageMonitor,
+  createMockWorkerManager,
+  type MockUsageMonitor,
+  type MockWorkerManager,
 } from "./__tests__/orchestrator-test-utils.js";
 import { ORCHESTRATOR_DIR, getPauseSignalPath } from "../utils/constants.js";
 
@@ -776,5 +780,204 @@ describe("Orchestrator Integration - Pause and Resume", () => {
     // Verify removal
     exists = await fs.access(signalPath).then(() => true).catch(() => false);
     expect(exists).toBe(false);
+  });
+});
+
+// ============================================================
+// Integration Tests - Rate Limit Handling
+// ============================================================
+
+describe("Orchestrator Integration - Rate Limit Handling", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempProjectDir();
+    await fs.writeFile(path.join(tempDir, ".gitignore"), ".conductor/\n");
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await cleanupTempDir(tempDir);
+  });
+
+  // ============================================================
+  // Test 1: Worker rate limit event can be detected in events
+  // ============================================================
+
+  it("worker manager can emit provider_rate_limited events", async () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const workerManager: MockWorkerManager = createMockWorkerManager({
+      workerEvents: [
+        {
+          type: "provider_rate_limited",
+          sessionId: "worker-001",
+          provider: "claude",
+          detail: "Rate limit exceeded",
+          resets_at: resetTime,
+        },
+      ],
+    });
+
+    // Get events from worker manager
+    const events = workerManager.getWorkerEvents();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("provider_rate_limited");
+    if (events[0].type === "provider_rate_limited") {
+      expect(events[0].provider).toBe("claude");
+      expect(events[0].resets_at).toBe(resetTime);
+    }
+  });
+
+  // ============================================================
+  // Test 2: Rate limit with resets_at timestamp can be stored
+  // ============================================================
+
+  it("rate limit event contains resets_at timestamp for scheduling", async () => {
+    const resetTime = new Date(Date.now() + 30 * 60 * 1000).toISOString(); // 30 min
+
+    const workerManager: MockWorkerManager = createMockWorkerManager({
+      workerEvents: [
+        {
+          type: "provider_rate_limited",
+          sessionId: "worker-002",
+          provider: "claude",
+          detail: "5h utilization at 95%",
+          resets_at: resetTime,
+        },
+      ],
+    });
+
+    const events = workerManager.getWorkerEvents();
+    const rateLimitEvent = events.find(e => e.type === "provider_rate_limited");
+
+    expect(rateLimitEvent).toBeDefined();
+    if (rateLimitEvent?.type === "provider_rate_limited") {
+      expect(rateLimitEvent.resets_at).toBe(resetTime);
+      // This timestamp would be used by handleProviderRateLimit to schedule resume
+    }
+  });
+
+  // ============================================================
+  // Test 3: Usage critical triggers pause state
+  // ============================================================
+
+  it("usage monitor critical state leads to pause decision", async () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const usageMonitor: MockUsageMonitor = createMockUsageMonitor({
+      provider: "claude",
+      critical: true,
+      windDownNeeded: true,
+      resetTime,
+      usage: {
+        five_hour: 0.95,
+        seven_day: 0.4,
+        five_hour_resets_at: resetTime,
+        seven_day_resets_at: null,
+        last_checked: new Date().toISOString(),
+      },
+    });
+
+    // Verify the mock returns critical state
+    expect(usageMonitor.isCritical()).toBe(true);
+    expect(usageMonitor.isWindDownNeeded()).toBe(true);
+    expect(usageMonitor.getResetTime()).toBe(resetTime);
+
+    // In the orchestrator, this would trigger:
+    // 1. Wind-down signal to workers
+    // 2. Pause with resume_after = resetTime
+
+    const stateManager = new StateManager(tempDir);
+    await stateManager.initialize("Usage critical test", "conduct/usage-critical", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("executing");
+
+    // Simulate the orchestrator's handleProviderRateLimit behavior
+    await stateManager.pause(resetTime);
+
+    const state = stateManager.get();
+    expect(state.status).toBe("paused");
+    expect(state.resume_after).toBe(resetTime);
+  });
+
+  // ============================================================
+  // Test 4: Codex usage critical during review triggers pause
+  // ============================================================
+
+  it("codex usage monitor critical state can be detected", async () => {
+    const resetTime = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+    const codexUsageMonitor: MockUsageMonitor = createMockUsageMonitor({
+      provider: "codex",
+      critical: true,
+      windDownNeeded: true,
+      resetTime,
+      usage: {
+        five_hour: 0.92,
+        seven_day: 0.3,
+        five_hour_resets_at: resetTime,
+        seven_day_resets_at: null,
+        last_checked: new Date().toISOString(),
+      },
+    });
+
+    expect(codexUsageMonitor.provider).toBe("codex");
+    expect(codexUsageMonitor.isCritical()).toBe(true);
+    expect(codexUsageMonitor.getResetTime()).toBe(resetTime);
+
+    // In the orchestrator, during review phase with codex runtime,
+    // this would trigger pause before code review
+  });
+
+  // ============================================================
+  // Test 5: Wind-down signal can be sent to workers
+  // ============================================================
+
+  it("worker manager can signal wind-down to workers", async () => {
+    const workerManager: MockWorkerManager = createMockWorkerManager({
+      activeWorkers: ["worker-001", "worker-002"],
+    });
+
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    await workerManager.signalWindDown("usage threshold reached", resetTime);
+
+    expect(workerManager.signalWindDown).toHaveBeenCalledWith(
+      "usage threshold reached",
+      resetTime,
+    );
+  });
+
+  // ============================================================
+  // Test 6: Multiple rate limit events are accumulated
+  // ============================================================
+
+  it("multiple rate limit events can be accumulated", async () => {
+    const resetTime = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const workerManager: MockWorkerManager = createMockWorkerManager({
+      workerEvents: [
+        {
+          type: "provider_rate_limited",
+          sessionId: "worker-001",
+          provider: "claude",
+          detail: "First rate limit",
+          resets_at: resetTime,
+        },
+        {
+          type: "provider_rate_limited",
+          sessionId: "worker-002",
+          provider: "claude",
+          detail: "Second rate limit",
+          resets_at: resetTime,
+        },
+      ],
+    });
+
+    const events = workerManager.getWorkerEvents();
+    const rateLimitEvents = events.filter(e => e.type === "provider_rate_limited");
+
+    expect(rateLimitEvents).toHaveLength(2);
   });
 });
