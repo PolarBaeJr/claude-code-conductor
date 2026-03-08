@@ -12,6 +12,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
+// Mock child_process.execFile to prevent real `npm test` subprocesses from spawning
+// during validation-pass tests. Tests that should fail validation never reach execFile.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    execFile: vi.fn((_cmd: string, _args: unknown, _opts: unknown, cb?: Function) => {
+      if (cb) cb(null, { stdout: "mocked test output", stderr: "" });
+      return { on: vi.fn(), stdout: null, stderr: null, pid: 0 };
+    }),
+  };
+});
+
 import {
   handleClaimTask,
   handleCompleteTask,
@@ -539,8 +552,7 @@ describe("handleRunTests - test_files validation", () => {
   });
 
   it("accepts valid test file paths with .test.ts extension", async () => {
-    // Note: This test will fail with npm test error since the file doesn't exist
-    // but it should NOT fail validation - the error should be from npm, not our validation
+    // execFile is mocked at module level - no real subprocess spawned
     const result = await handleRunTests({
       test_files: ["src/utils/validation.test.ts"],
     });

@@ -37,34 +37,38 @@ let shutdownInProgress = false;
 // ============================================================
 
 /**
+ * Result of reading state.json, distinguishing between missing and invalid states.
+ */
+type ReadStateResult =
+  | { status: "ok"; state: OrchestratorState }
+  | { status: "missing" }
+  | { status: "invalid"; errors: string[] };
+
+/**
  * Read and validate state.json using Zod schema.
  *
  * Uses lenient validation to handle backward compatibility with older state files.
- * Returns null if file doesn't exist or validation fails (graceful degradation for CLI).
+ * Returns a typed result distinguishing between missing file, invalid schema, and success.
  *
  * @param projectDir - Project directory path
- * @returns Validated state or null if not available
+ * @returns Typed result with state or error information
  */
-async function readState(projectDir: string): Promise<OrchestratorState | null> {
+async function readState(projectDir: string): Promise<ReadStateResult> {
   const statePath = getStatePath(projectDir);
+  let raw: string;
   try {
-    const raw = await fs.readFile(statePath, "utf-8");
-
-    // Validate with Zod schema (CRITICAL - state.json validation)
-    const result = validateStateJsonLenient(raw);
-    if (!result.valid) {
-      // Log validation errors but return null for graceful degradation
-      console.error(chalk.yellow(`Warning: State file validation failed:`));
-      for (const error of result.errors) {
-        console.error(chalk.yellow(`  - ${error}`));
-      }
-      return null;
-    }
-
-    return result.state as OrchestratorState;
+    raw = await fs.readFile(statePath, "utf-8");
   } catch {
-    return null;
+    return { status: "missing" };
   }
+
+  // Validate with Zod schema (CRITICAL - state.json validation)
+  const result = validateStateJsonLenient(raw);
+  if (!result.valid) {
+    return { status: "invalid", errors: result.errors };
+  }
+
+  return { status: "ok", state: result.state as OrchestratorState };
 }
 
 async function readAllTasks(projectDir: string): Promise<Task[]> {
@@ -375,12 +379,21 @@ program
   .action(async (opts: Record<string, string>) => {
     const projectDir = path.resolve(opts.project);
 
-    const state = await readState(projectDir);
-    if (!state) {
+    const stateResult = await readState(projectDir);
+    if (stateResult.status === "missing") {
       console.log(chalk.yellow("\nNo conductor state found in this project."));
       console.log(chalk.gray(`Looked in: ${getStatePath(projectDir)}\n`));
       return;
     }
+    if (stateResult.status === "invalid") {
+      console.error(chalk.red("\nConductor state file exists but is invalid:"));
+      for (const error of stateResult.errors) {
+        console.error(chalk.yellow(`  - ${error}`));
+      }
+      console.error(chalk.gray(`File: ${getStatePath(projectDir)}\n`));
+      return;
+    }
+    const state = stateResult.state;
 
     const tasks = await readAllTasks(projectDir);
     const completed = tasks.filter((t) => t.status === "completed");
@@ -603,11 +616,20 @@ program
   .action(async (opts: Record<string, string | boolean | undefined>) => {
     const projectDir = path.resolve(opts.project as string);
 
-    const state = await readState(projectDir);
-    if (!state) {
+    const stateResult = await readState(projectDir);
+    if (stateResult.status === "missing") {
       console.error(chalk.red("\nNo conductor state found. Nothing to resume.\n"));
       process.exit(1);
     }
+    if (stateResult.status === "invalid") {
+      console.error(chalk.red("\nConductor state file exists but is invalid:"));
+      for (const error of stateResult.errors) {
+        console.error(chalk.yellow(`  - ${error}`));
+      }
+      console.error(chalk.gray(`File: ${getStatePath(projectDir)}\n`));
+      process.exit(1);
+    }
+    const state = stateResult.state;
 
     if (state.status === "completed" || state.status === "failed") {
       console.error(
@@ -724,11 +746,20 @@ program
   .action(async (opts: Record<string, string>) => {
     const projectDir = path.resolve(opts.project);
 
-    const state = await readState(projectDir);
-    if (!state) {
+    const stateResult = await readState(projectDir);
+    if (stateResult.status === "missing") {
       console.error(chalk.red("\nNo conductor state found. Nothing to pause.\n"));
       process.exit(1);
     }
+    if (stateResult.status === "invalid") {
+      console.error(chalk.red("\nConductor state file exists but is invalid:"));
+      for (const error of stateResult.errors) {
+        console.error(chalk.yellow(`  - ${error}`));
+      }
+      console.error(chalk.gray(`File: ${getStatePath(projectDir)}\n`));
+      process.exit(1);
+    }
+    const state = stateResult.state;
 
     if (state.status !== "executing" && state.status !== "planning" && state.status !== "reviewing") {
       console.error(

@@ -7,6 +7,7 @@ export class Logger {
   private logFilePath: string;
   private logStream: fs.WriteStream;
   private closed: boolean = false;
+  private exitHandler: (() => void) | null = null;
 
   constructor(logDir: string, name: string) {
     this.name = name;
@@ -18,8 +19,10 @@ export class Logger {
     // Use mode 0o600 for owner-only read/write access (security requirement #15)
     this.logStream = fs.createWriteStream(this.logFilePath, { flags: "a", mode: 0o600 });
 
-    // Safety net: close stream on process exit to prevent file descriptor leak (task-010)
-    process.on("exit", () => this.close());
+    // Safety net: close stream on process exit to prevent file descriptor leak (task-010).
+    // Store reference so we can remove it in close() to avoid listener accumulation.
+    this.exitHandler = () => this.close();
+    process.on("exit", this.exitHandler);
   }
 
   /**
@@ -30,6 +33,11 @@ export class Logger {
     if (this.closed) return;
     this.closed = true;
     this.logStream.end();
+    // Remove the process exit listener to prevent listener accumulation
+    if (this.exitHandler) {
+      process.removeListener("exit", this.exitHandler);
+      this.exitHandler = null;
+    }
   }
 
   /**
