@@ -20,17 +20,87 @@ import path from "node:path";
 
 // Mock the SDK BEFORE importing Orchestrator (hoisted by vitest)
 // Using inline vi.fn() to avoid hoisting issues
-vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
-  query: vi.fn(() => ({
-    async *[Symbol.asyncIterator]() {
-      yield { type: "result", result: "" };
-    },
-  })),
-  createSdkMcpServer: vi.fn(() => ({
-    close: vi.fn(),
-  })),
-  tool: vi.fn(() => ({})),
-}));
+// The Query interface extends AsyncGenerator<SDKMessage, void> and requires additional methods
+vi.mock("@anthropic-ai/claude-agent-sdk", () => {
+  // Helper to create a fully-typed mock Query object that satisfies the SDK interface
+  // Defined inline to ensure it's available when the mock factory runs
+  const createMockQueryInternal = (result: string) => {
+    // Create a proper SDKResultMessage-like object (only "result" type is used in tests)
+    const mockResultMessage = {
+      type: "result" as const,
+      subtype: "success" as const,
+      duration_ms: 100,
+      duration_api_ms: 90,
+      is_error: false,
+      num_turns: 1,
+      result,
+      total_cost_usd: 0.001,
+      usage: {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      modelUsage: {},
+      permission_denials: [],
+      structured_output: undefined,
+      uuid: "00000000-0000-0000-0000-000000000000" as `${string}-${string}-${string}-${string}-${string}`,
+      session_id: "test-session-id",
+    };
+
+    const generator = (async function* () {
+      yield mockResultMessage;
+    })();
+
+    // Create the mock Query object with all required interface methods
+    const mockQuery = {
+      // AsyncGenerator methods
+      next: generator.next.bind(generator),
+      return: generator.return.bind(generator),
+      throw: generator.throw.bind(generator),
+      [Symbol.asyncIterator]: () => mockQuery,
+
+      // Query interface methods (control requests)
+      interrupt: vi.fn().mockResolvedValue(undefined),
+      setPermissionMode: vi.fn().mockResolvedValue(undefined),
+      setModel: vi.fn().mockResolvedValue(undefined),
+      setMaxThinkingTokens: vi.fn().mockResolvedValue(undefined),
+      supportedCommands: vi.fn().mockResolvedValue([]),
+      supportedModels: vi.fn().mockResolvedValue([]),
+      mcpServerStatus: vi.fn().mockResolvedValue([]),
+      accountInfo: vi.fn().mockResolvedValue({
+        email: "test@example.com",
+        organizationName: null,
+        subscriptionType: "free",
+      }),
+      rewindFiles: vi.fn().mockResolvedValue({
+        canRewind: true,
+        error: null,
+        filesAdded: 0,
+        filesModified: 0,
+        filesDeleted: 0,
+      }),
+      setMcpServers: vi.fn().mockResolvedValue({
+        added: [],
+        removed: [],
+        errors: [],
+      }),
+      streamInput: vi.fn().mockResolvedValue(undefined),
+    };
+
+    return mockQuery;
+  };
+
+  return {
+    query: vi.fn(() => createMockQueryInternal("")),
+    createSdkMcpServer: vi.fn(() => ({
+      close: vi.fn(),
+    })),
+    tool: vi.fn(() => ({})),
+    // Export the helper so it can be used elsewhere
+    __createMockQuery: createMockQueryInternal,
+  };
+});
 
 // Mock child_process for codex CLI
 vi.mock("node:child_process", () => ({
@@ -95,12 +165,72 @@ function createTestOptions(projectDir: string, overrides: Partial<CLIOptions> = 
 }
 
 // Helper to create a mock async iterable query result
+// Recreates the full mock Query object to satisfy the SDK interface
 function createMockQueryResult(result: string) {
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield { type: "result", result };
+  // Create a proper SDKResultMessage-like object
+  const mockResultMessage = {
+    type: "result" as const,
+    subtype: "success" as const,
+    duration_ms: 100,
+    duration_api_ms: 90,
+    is_error: false,
+    num_turns: 1,
+    result,
+    total_cost_usd: 0.001,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
     },
+    modelUsage: {},
+    permission_denials: [],
+    structured_output: undefined,
+    uuid: "00000000-0000-0000-0000-000000000000" as `${string}-${string}-${string}-${string}-${string}`,
+    session_id: "test-session-id",
   };
+
+  const generator = (async function* () {
+    yield mockResultMessage;
+  })();
+
+  // Create the mock Query object with all required interface methods
+  const mockQuery = {
+    // AsyncGenerator methods
+    next: generator.next.bind(generator),
+    return: generator.return.bind(generator),
+    throw: generator.throw.bind(generator),
+    [Symbol.asyncIterator]: () => mockQuery,
+
+    // Query interface methods (control requests)
+    interrupt: vi.fn().mockResolvedValue(undefined),
+    setPermissionMode: vi.fn().mockResolvedValue(undefined),
+    setModel: vi.fn().mockResolvedValue(undefined),
+    setMaxThinkingTokens: vi.fn().mockResolvedValue(undefined),
+    supportedCommands: vi.fn().mockResolvedValue([]),
+    supportedModels: vi.fn().mockResolvedValue([]),
+    mcpServerStatus: vi.fn().mockResolvedValue([]),
+    accountInfo: vi.fn().mockResolvedValue({
+      email: "test@example.com",
+      organizationName: null,
+      subscriptionType: "free",
+    }),
+    rewindFiles: vi.fn().mockResolvedValue({
+      canRewind: true,
+      error: null,
+      filesAdded: 0,
+      filesModified: 0,
+      filesDeleted: 0,
+    }),
+    setMcpServers: vi.fn().mockResolvedValue({
+      added: [],
+      removed: [],
+      errors: [],
+    }),
+    streamInput: vi.fn().mockResolvedValue(undefined),
+  };
+
+  return mockQuery;
 }
 
 // ============================================================
