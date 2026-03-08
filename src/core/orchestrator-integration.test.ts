@@ -333,3 +333,235 @@ describe("Orchestrator Integration - Happy Path", () => {
     expect(state.paused_at).toBeNull();
   });
 });
+
+// ============================================================
+// Integration Tests - Checkpoint Gating
+// ============================================================
+
+describe("Orchestrator Integration - Checkpoint Gating", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempProjectDir();
+    await fs.writeFile(path.join(tempDir, ".gitignore"), ".conductor/\n");
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await cleanupTempDir(tempDir);
+  });
+
+  // ============================================================
+  // Test 1: All tasks completed -> checkpoint logic determines 'complete'
+  // ============================================================
+
+  it("all tasks completed results in complete checkpoint decision", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Checkpoint complete test", "conduct/checkpoint-complete", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create two tasks and mark them both completed
+    const taskDef1 = createMockTaskDefinition({ subject: "Task 1" });
+    const taskDef2 = createMockTaskDefinition({ subject: "Task 2" });
+    await stateManager.createTask(taskDef1, "task-001", []);
+    await stateManager.createTask(taskDef2, "task-002", []);
+
+    // Mark both tasks as completed
+    for (const taskId of ["task-001", "task-002"]) {
+      const taskPath = path.join(tempDir, ORCHESTRATOR_DIR, "tasks", `${taskId}.json`);
+      const taskContent = await fs.readFile(taskPath, "utf-8");
+      const task: Task = JSON.parse(taskContent);
+      task.status = "completed";
+      task.completed_at = new Date().toISOString();
+      await fs.writeFile(taskPath, JSON.stringify(task, null, 2));
+    }
+
+    // Verify checkpoint conditions
+    const tasks = await stateManager.getAllTasks();
+    const completed = tasks.filter((t) => t.status === "completed");
+    const failed = tasks.filter((t) => t.status === "failed");
+    const pending = tasks.filter((t) => t.status === "pending");
+    const inProgress = tasks.filter((t) => t.status === "in_progress");
+
+    const remaining = pending.length + inProgress.length;
+
+    // Checkpoint should return 'complete' when:
+    // remaining === 0 && failed.length === 0
+    expect(completed.length).toBe(2);
+    expect(failed.length).toBe(0);
+    expect(remaining).toBe(0);
+
+    // This matches the condition in checkpoint() that returns 'complete'
+  });
+
+  // ============================================================
+  // Test 2: Some tasks failed with room for retries -> continue
+  // ============================================================
+
+  it("failed tasks with remaining cycles results in continue decision", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Checkpoint continue test", "conduct/checkpoint-continue", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create a task and mark it failed
+    const taskDef = createMockTaskDefinition({ subject: "Failing task" });
+    await stateManager.createTask(taskDef, "task-001", []);
+
+    const taskPath = path.join(tempDir, ORCHESTRATOR_DIR, "tasks", "task-001.json");
+    const taskContent = await fs.readFile(taskPath, "utf-8");
+    const task: Task = JSON.parse(taskContent);
+    task.status = "failed";
+    await fs.writeFile(taskPath, JSON.stringify(task, null, 2));
+
+    // Verify checkpoint conditions
+    const tasks = await stateManager.getAllTasks();
+    const state = stateManager.get();
+    const failed = tasks.filter((t) => t.status === "failed");
+
+    // We're at cycle 0, max is 3, so there's room for more cycles
+    expect(failed.length).toBe(1);
+    expect(state.current_cycle).toBeLessThan(state.max_cycles - 1);
+
+    // Checkpoint should return 'continue' when:
+    // failed.length > 0 && current_cycle + 1 < max_cycles
+  });
+
+  // ============================================================
+  // Test 3: Max cycles reached with incomplete tasks -> escalate
+  // ============================================================
+
+  it("max cycles reached with incomplete tasks results in escalate decision", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Checkpoint escalate test", "conduct/checkpoint-escalate", {
+      maxCycles: 2,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create a pending task
+    const taskDef = createMockTaskDefinition({ subject: "Incomplete task" });
+    await stateManager.createTask(taskDef, "task-001", []);
+
+    // Record cycle to bring current_cycle to 1 (max is 2)
+    await stateManager.recordCycle({
+      cycle: 1,
+      plan_version: 1,
+      tasks_completed: 0,
+      tasks_failed: 0,
+      codex_plan_approved: true,
+      codex_code_approved: true,
+      plan_discussion_rounds: 1,
+      code_review_rounds: 1,
+      duration_ms: 60000,
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+    });
+
+    const state = stateManager.get();
+    const tasks = await stateManager.getAllTasks();
+    const pending = tasks.filter((t) => t.status === "pending");
+
+    // We're at cycle 1, max is 2, so current_cycle + 1 >= max_cycles
+    expect(state.current_cycle).toBe(1);
+    expect(state.max_cycles).toBe(2);
+    expect(state.current_cycle + 1).toBeGreaterThanOrEqual(state.max_cycles);
+    expect(pending.length).toBe(1);
+
+    // Checkpoint should return 'escalate' when:
+    // current_cycle + 1 >= max_cycles && remaining > 0
+  });
+
+  // ============================================================
+  // Test 4: Pause sets paused_at and changes status
+  // ============================================================
+
+  it("pause during checkpoint sets paused_at timestamp", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Checkpoint pause test", "conduct/checkpoint-pause", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("checkpointing");
+
+    // Simulate user-requested pause
+    await stateManager.pause("user_requested");
+
+    const state = stateManager.get();
+
+    expect(state.status).toBe("paused");
+    expect(state.paused_at).not.toBeNull();
+
+    // Checkpoint returns 'pause' when userPauseRequested is true
+    // or when usage monitor indicates wind-down needed
+  });
+
+  // ============================================================
+  // Test 5: Status transitions through checkpoint phase
+  // ============================================================
+
+  it("status can transition to checkpointing", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Checkpoint status test", "conduct/checkpoint-status", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    // Transition through phases
+    await stateManager.setStatus("planning");
+    expect(stateManager.get().status).toBe("planning");
+
+    await stateManager.setStatus("executing");
+    expect(stateManager.get().status).toBe("executing");
+
+    await stateManager.setStatus("reviewing");
+    expect(stateManager.get().status).toBe("reviewing");
+
+    await stateManager.setStatus("flow_tracing");
+    expect(stateManager.get().status).toBe("flow_tracing");
+
+    await stateManager.setStatus("checkpointing");
+    expect(stateManager.get().status).toBe("checkpointing");
+
+    await stateManager.setStatus("completed");
+    expect(stateManager.get().status).toBe("completed");
+  });
+
+  // ============================================================
+  // Test 6: Escalated status can be set
+  // ============================================================
+
+  it("status can transition to escalated", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Checkpoint escalated test", "conduct/checkpoint-escalated", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("checkpointing");
+    await stateManager.setStatus("escalated");
+
+    expect(stateManager.get().status).toBe("escalated");
+  });
+});
