@@ -442,6 +442,10 @@ export function createMockUsageMonitor(
     isDataStale: vi.fn().mockReturnValue(stale),
     getConsecutiveFailures: vi.fn().mockReturnValue(consecutiveFailures),
     getStaleDurationMs: vi.fn().mockReturnValue(0),
+    getUsageRatePerMinute: vi.fn().mockReturnValue(null),
+    estimateMinutesUntilThreshold: vi.fn().mockReturnValue(null),
+    isThresholdPredicted: vi.fn().mockReturnValue(false),
+    getRateSummary: vi.fn().mockReturnValue("rate: insufficient data"),
   };
 }
 

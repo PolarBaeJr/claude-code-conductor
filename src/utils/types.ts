@@ -301,6 +301,14 @@ export interface ProviderUsageMonitor {
   getConsecutiveFailures(): number;
   /** Milliseconds since the last successful poll, or 0 if never polled. */
   getStaleDurationMs(): number;
+  /** Usage rate as fraction per minute (e.g. 0.006 = 0.6%/min). Null if insufficient data. */
+  getUsageRatePerMinute(): number | null;
+  /** Estimated minutes until the threshold is reached. Null if rate is unavailable or non-positive. */
+  estimateMinutesUntilThreshold(threshold?: number): number | null;
+  /** True if rate tracking predicts the threshold will be hit before the next poll. */
+  isThresholdPredicted(): boolean;
+  /** Human-readable rate summary for logging. */
+  getRateSummary(): string;
 }
 
 export interface WorkerSharedContext {
