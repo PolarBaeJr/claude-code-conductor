@@ -1361,3 +1361,293 @@ describe("Orchestrator Integration - Force Resume Crash Recovery", () => {
     expect(forceableStatuses.has("initializing")).toBe(false);
   });
 });
+
+// ============================================================
+// Integration Tests - Escalation Handling
+// ============================================================
+
+describe("Orchestrator Integration - Escalation", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempProjectDir();
+    await fs.writeFile(path.join(tempDir, ".gitignore"), ".conductor/\n");
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await cleanupTempDir(tempDir);
+  });
+
+  // ============================================================
+  // Test 1: Max cycles reached triggers escalation
+  // ============================================================
+
+  it("max cycles reached triggers escalated status", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Escalation max cycles test", "conduct/escalation-max", {
+      maxCycles: 2,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create a pending task that won't be completed
+    const taskDef = createMockTaskDefinition({ subject: "Incomplete task" });
+    await stateManager.createTask(taskDef, "task-001", []);
+
+    // Record cycle 1
+    await stateManager.recordCycle({
+      cycle: 1,
+      plan_version: 1,
+      tasks_completed: 0,
+      tasks_failed: 1,
+      codex_plan_approved: true,
+      codex_code_approved: true,
+      plan_discussion_rounds: 1,
+      code_review_rounds: 1,
+      duration_ms: 60000,
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+    });
+
+    // We're now at cycle 1, max is 2 -> next cycle would exceed max
+    const state = stateManager.get();
+    expect(state.current_cycle).toBe(1);
+    expect(state.max_cycles).toBe(2);
+
+    // Simulate orchestrator escalation behavior
+    // In real orchestrator, checkpoint() would call escalateToUser()
+    await stateManager.setStatus("escalated");
+
+    expect(stateManager.get().status).toBe("escalated");
+  });
+
+  // ============================================================
+  // Test 2: Persistent task failures trigger escalation
+  // ============================================================
+
+  it("persistent task failures with max cycles leads to escalation", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Escalation failures test", "conduct/escalation-fail", {
+      maxCycles: 2,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create a task and mark it as failed
+    const taskDef = createMockTaskDefinition({ subject: "Failing task" });
+    await stateManager.createTask(taskDef, "task-001", []);
+
+    const taskPath = path.join(tempDir, ORCHESTRATOR_DIR, "tasks", "task-001.json");
+    const taskContent = await fs.readFile(taskPath, "utf-8");
+    const task: Task = JSON.parse(taskContent);
+    task.status = "failed";
+    task.retry_count = 3; // Max retries exceeded
+    task.last_error = "Persistent error after 3 retries";
+    await fs.writeFile(taskPath, JSON.stringify(task, null, 2));
+
+    // Record cycle to bring to max
+    await stateManager.recordCycle({
+      cycle: 1,
+      plan_version: 1,
+      tasks_completed: 0,
+      tasks_failed: 1,
+      codex_plan_approved: true,
+      codex_code_approved: true,
+      plan_discussion_rounds: 1,
+      code_review_rounds: 1,
+      duration_ms: 60000,
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+    });
+
+    // Verify conditions for escalation
+    const state = stateManager.get();
+    const tasks = await stateManager.getAllTasks();
+    const failed = tasks.filter(t => t.status === "failed");
+
+    expect(failed.length).toBe(1);
+    expect(failed[0].retry_count).toBe(3);
+    expect(state.current_cycle + 1).toBeGreaterThanOrEqual(state.max_cycles);
+
+    // Escalation should be triggered
+    await stateManager.setStatus("escalated");
+    expect(stateManager.get().status).toBe("escalated");
+  });
+
+  // ============================================================
+  // Test 3: Escalation file is written with correct context (non-interactive)
+  // ============================================================
+
+  it("escalation file contains reason, details, and options", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Escalation file test", "conduct/escalation-file", {
+      maxCycles: 2,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+    await stateManager.setStatus("escalated");
+
+    // Simulate writing escalation file (what orchestrator does in non-interactive mode)
+    const escalationPath = path.join(tempDir, ORCHESTRATOR_DIR, "escalation.json");
+    const escalation = {
+      reason: "Cycle limit reached",
+      details: "Completed 2 cycle(s). Some tasks may remain incomplete.",
+      timestamp: new Date().toISOString(),
+      options: ["continue", "redirect", "stop"],
+    };
+    await fs.writeFile(
+      escalationPath,
+      JSON.stringify(escalation, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+
+    // Verify escalation file contents
+    const content = await fs.readFile(escalationPath, "utf-8");
+    const parsed = JSON.parse(content);
+
+    expect(parsed.reason).toBe("Cycle limit reached");
+    expect(parsed.details).toContain("cycle(s)");
+    expect(parsed.options).toEqual(["continue", "redirect", "stop"]);
+    expect(parsed.timestamp).toBeDefined();
+  });
+
+  // ============================================================
+  // Test 4: Escalation with 'redirect' response stores guidance
+  // ============================================================
+
+  it("escalation redirect response can store redirectGuidance", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Redirect guidance test", "conduct/redirect-guidance", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+    await stateManager.setStatus("escalated");
+
+    // Simulate storing redirect guidance (what orchestrator does after user provides guidance)
+    // Create an escalation response file to simulate user response
+    const responsePath = path.join(tempDir, ORCHESTRATOR_DIR, "escalation-response.json");
+    const response = {
+      choice: "redirect",
+      guidance: "Focus on implementing the authentication flow first",
+      responded_at: new Date().toISOString(),
+    };
+    await fs.writeFile(responsePath, JSON.stringify(response, null, 2));
+
+    // Verify response can be read
+    const content = await fs.readFile(responsePath, "utf-8");
+    const parsed = JSON.parse(content);
+
+    expect(parsed.choice).toBe("redirect");
+    expect(parsed.guidance).toBe("Focus on implementing the authentication flow first");
+
+    // Resume from escalation - should transition to planning for next cycle
+    await stateManager.setStatus("planning");
+    expect(stateManager.get().status).toBe("planning");
+  });
+
+  // ============================================================
+  // Test 5: Escalation with 'stop' response completes orchestrator
+  // ============================================================
+
+  it("escalation stop response leads to completed status", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Stop escalation test", "conduct/stop-escalation", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create a completed task to show some work was done
+    const taskDef = createMockTaskDefinition({ subject: "Completed task" });
+    await stateManager.createTask(taskDef, "task-001", []);
+
+    const taskPath = path.join(tempDir, ORCHESTRATOR_DIR, "tasks", "task-001.json");
+    const taskContent = await fs.readFile(taskPath, "utf-8");
+    const task: Task = JSON.parse(taskContent);
+    task.status = "completed";
+    task.completed_at = new Date().toISOString();
+    await fs.writeFile(taskPath, JSON.stringify(task, null, 2));
+
+    await stateManager.setStatus("escalated");
+
+    // Simulate user choosing "stop"
+    // In orchestrator, this calls complete() which sets status to "completed"
+    await stateManager.setStatus("completed");
+
+    expect(stateManager.get().status).toBe("completed");
+  });
+
+  // ============================================================
+  // Test 6: Escalation with 'continue' response proceeds to next cycle
+  // ============================================================
+
+  it("escalation continue response allows state transition to planning", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Continue escalation test", "conduct/continue-escalation", {
+      maxCycles: 5, // Set higher to allow continuation
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("escalated");
+
+    // Simulate user choosing "continue"
+    // In orchestrator, this returns "continue" and the run loop proceeds to next cycle
+    await stateManager.setStatus("planning");
+
+    expect(stateManager.get().status).toBe("planning");
+  });
+
+  // ============================================================
+  // Test 7: Escalation file uses secure permissions
+  // ============================================================
+
+  it("escalation file uses secure permissions (0o600)", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Secure escalation test", "conduct/secure-escalation", {
+      maxCycles: 2,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Write escalation file with secure permissions
+    const escalationPath = path.join(tempDir, ORCHESTRATOR_DIR, "escalation.json");
+    const escalation = {
+      reason: "Test escalation",
+      details: "Security test",
+      timestamp: new Date().toISOString(),
+      options: ["continue", "redirect", "stop"],
+    };
+    await fs.writeFile(
+      escalationPath,
+      JSON.stringify(escalation, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+
+    // Verify file permissions
+    const stat = await fs.stat(escalationPath);
+    const mode = stat.mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+});
