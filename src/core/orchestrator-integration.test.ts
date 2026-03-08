@@ -2069,3 +2069,373 @@ describe("Orchestrator Integration - Codex Loops", () => {
     expect(code3.verdict).toBe("APPROVE");
   });
 });
+
+// ============================================================
+// Integration Tests - Edge Cases and Boundaries
+// ============================================================
+
+describe("Orchestrator Integration - Edge Cases and Boundaries", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempProjectDir();
+    await fs.writeFile(path.join(tempDir, ".gitignore"), ".conductor/\n");
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await cleanupTempDir(tempDir);
+  });
+
+  // ============================================================
+  // Test 1: Max cycles = 1 completes after single cycle
+  // ============================================================
+
+  it("max cycles = 1 allows exactly one cycle", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Single cycle test", "conduct/single-cycle", {
+      maxCycles: 1,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    const state = stateManager.get();
+    expect(state.max_cycles).toBe(1);
+    expect(state.current_cycle).toBe(0);
+
+    // Record one cycle
+    await stateManager.recordCycle({
+      cycle: 1,
+      plan_version: 1,
+      tasks_completed: 3,
+      tasks_failed: 0,
+      codex_plan_approved: true,
+      codex_code_approved: true,
+      plan_discussion_rounds: 1,
+      code_review_rounds: 1,
+      duration_ms: 60000,
+      started_at: new Date().toISOString(),
+      completed_at: new Date().toISOString(),
+    });
+
+    // After one cycle, current_cycle should be 1
+    expect(stateManager.get().current_cycle).toBe(1);
+
+    // At this point, current_cycle + 1 (2) > max_cycles (1)
+    // So no more cycles should be allowed
+    const afterCycle = stateManager.get();
+    expect(afterCycle.current_cycle + 1).toBeGreaterThan(afterCycle.max_cycles);
+  });
+
+  // ============================================================
+  // Test 2: Cycle counter increments correctly across multiple cycles
+  // ============================================================
+
+  it("cycle counter increments correctly across multiple cycles", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Multi cycle test", "conduct/multi-cycle", {
+      maxCycles: 5,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    expect(stateManager.get().current_cycle).toBe(0);
+
+    // Record 3 cycles
+    for (let i = 1; i <= 3; i++) {
+      await stateManager.recordCycle({
+        cycle: i,
+        plan_version: 1,
+        tasks_completed: 2,
+        tasks_failed: 0,
+        codex_plan_approved: true,
+        codex_code_approved: true,
+        plan_discussion_rounds: 1,
+        code_review_rounds: 1,
+        duration_ms: 30000 * i,
+        started_at: new Date(Date.now() - 60000 * (4 - i)).toISOString(),
+        completed_at: new Date(Date.now() - 60000 * (3 - i)).toISOString(),
+      });
+
+      expect(stateManager.get().current_cycle).toBe(i);
+    }
+
+    // Verify cycle history
+    const state = stateManager.get();
+    expect(state.current_cycle).toBe(3);
+    expect(state.cycle_history).toHaveLength(3);
+    expect(state.cycle_history[0].cycle).toBe(1);
+    expect(state.cycle_history[1].cycle).toBe(2);
+    expect(state.cycle_history[2].cycle).toBe(3);
+  });
+
+  // ============================================================
+  // Test 3: Empty task list after planning
+  // ============================================================
+
+  it("empty task list results in no pending tasks", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Empty tasks test", "conduct/empty-tasks", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Don't create any tasks - simulate empty planning result
+    const tasks = await stateManager.getAllTasks();
+
+    expect(tasks).toHaveLength(0);
+
+    // Verify task directory exists but is empty
+    const tasksDir = path.join(tempDir, ORCHESTRATOR_DIR, "tasks");
+    const stat = await fs.stat(tasksDir);
+    expect(stat.isDirectory()).toBe(true);
+
+    const taskFiles = await fs.readdir(tasksDir);
+    expect(taskFiles).toHaveLength(0);
+  });
+
+  // ============================================================
+  // Test 4: All tasks already completed on resume
+  // ============================================================
+
+  it("all tasks already completed means no pending work", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Resume completed test", "conduct/resume-completed", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create tasks and mark them all completed
+    const taskDef1 = createMockTaskDefinition({ subject: "Task 1" });
+    const taskDef2 = createMockTaskDefinition({ subject: "Task 2" });
+    const taskDef3 = createMockTaskDefinition({ subject: "Task 3" });
+    await stateManager.createTask(taskDef1, "task-001", []);
+    await stateManager.createTask(taskDef2, "task-002", []);
+    await stateManager.createTask(taskDef3, "task-003", []);
+
+    const tasksDir = path.join(tempDir, ORCHESTRATOR_DIR, "tasks");
+
+    for (const taskId of ["task-001", "task-002", "task-003"]) {
+      const taskPath = path.join(tasksDir, `${taskId}.json`);
+      const taskContent = await fs.readFile(taskPath, "utf-8");
+      const task: Task = JSON.parse(taskContent);
+      task.status = "completed";
+      task.completed_at = new Date().toISOString();
+      task.result_summary = `${taskId} completed successfully`;
+      await fs.writeFile(taskPath, JSON.stringify(task, null, 2));
+    }
+
+    // Pause and resume
+    await stateManager.setStatus("executing");
+    await stateManager.pause("test");
+    await stateManager.resume();
+
+    // Verify all tasks are still completed
+    const tasks = await stateManager.getAllTasks();
+    const pendingTasks = tasks.filter(t => t.status === "pending");
+    const completedTasks = tasks.filter(t => t.status === "completed");
+
+    expect(pendingTasks).toHaveLength(0);
+    expect(completedTasks).toHaveLength(3);
+
+    // In the orchestrator, this would trigger 'complete' checkpoint decision
+    const remaining = tasks.filter(
+      t => t.status === "pending" || t.status === "in_progress",
+    );
+    expect(remaining.length).toBe(0);
+  });
+
+  // ============================================================
+  // Test 5: Dry run option is correctly set
+  // ============================================================
+
+  it("dry run option correctly configures options", () => {
+    const dryRunOptions = createTestOptions(tempDir, {
+      dryRun: true,
+      skipCodex: true,
+      skipFlowReview: true,
+    });
+
+    expect(dryRunOptions.dryRun).toBe(true);
+    expect(dryRunOptions.skipCodex).toBe(true);
+    expect(dryRunOptions.skipFlowReview).toBe(true);
+
+    // Verify other default options are still set
+    expect(dryRunOptions.project).toBe(tempDir);
+    expect(dryRunOptions.concurrency).toBe(1);
+    expect(dryRunOptions.maxCycles).toBe(3);
+  });
+
+  // ============================================================
+  // Test 6: Cycle history accumulates correctly
+  // ============================================================
+
+  it("cycle history accumulates with unique durations", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("History accumulation test", "conduct/history-accum", {
+      maxCycles: 5,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    const durations = [45000, 60000, 75000];
+
+    for (let i = 0; i < durations.length; i++) {
+      await stateManager.recordCycle({
+        cycle: i + 1,
+        plan_version: 1,
+        tasks_completed: i + 1,
+        tasks_failed: 0,
+        codex_plan_approved: true,
+        codex_code_approved: true,
+        plan_discussion_rounds: 1,
+        code_review_rounds: 1,
+        duration_ms: durations[i],
+        started_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+      });
+    }
+
+    const state = stateManager.get();
+    expect(state.cycle_history).toHaveLength(3);
+    expect(state.cycle_history[0].duration_ms).toBe(45000);
+    expect(state.cycle_history[1].duration_ms).toBe(60000);
+    expect(state.cycle_history[2].duration_ms).toBe(75000);
+    expect(state.cycle_history[0].tasks_completed).toBe(1);
+    expect(state.cycle_history[1].tasks_completed).toBe(2);
+    expect(state.cycle_history[2].tasks_completed).toBe(3);
+  });
+
+  // ============================================================
+  // Test 7: State persists max_cycles correctly
+  // ============================================================
+
+  it("max_cycles persists correctly in state", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Max cycles persistence", "conduct/max-persist", {
+      maxCycles: 7,
+      concurrency: 3,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.save();
+
+    // Read state file directly
+    const statePath = path.join(tempDir, ORCHESTRATOR_DIR, "state.json");
+    const stateContent = await fs.readFile(statePath, "utf-8");
+    const persistedState = JSON.parse(stateContent);
+
+    expect(persistedState.max_cycles).toBe(7);
+    expect(persistedState.concurrency).toBe(3);
+  });
+
+  // ============================================================
+  // Test 8: Failed tasks counted correctly
+  // ============================================================
+
+  it("failed tasks are counted separately from pending", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Failed tasks test", "conduct/failed-tasks", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create tasks with different statuses
+    const taskDef1 = createMockTaskDefinition({ subject: "Completed task" });
+    const taskDef2 = createMockTaskDefinition({ subject: "Failed task" });
+    const taskDef3 = createMockTaskDefinition({ subject: "Pending task" });
+    await stateManager.createTask(taskDef1, "task-001", []);
+    await stateManager.createTask(taskDef2, "task-002", []);
+    await stateManager.createTask(taskDef3, "task-003", []);
+
+    const tasksDir = path.join(tempDir, ORCHESTRATOR_DIR, "tasks");
+
+    // Mark task-001 as completed
+    const task1Path = path.join(tasksDir, "task-001.json");
+    const task1Content = await fs.readFile(task1Path, "utf-8");
+    const task1: Task = JSON.parse(task1Content);
+    task1.status = "completed";
+    task1.completed_at = new Date().toISOString();
+    await fs.writeFile(task1Path, JSON.stringify(task1, null, 2));
+
+    // Mark task-002 as failed
+    const task2Path = path.join(tasksDir, "task-002.json");
+    const task2Content = await fs.readFile(task2Path, "utf-8");
+    const task2: Task = JSON.parse(task2Content);
+    task2.status = "failed";
+    task2.completed_at = new Date().toISOString();
+    task2.result_summary = "Task failed due to error";
+    await fs.writeFile(task2Path, JSON.stringify(task2, null, 2));
+
+    // Verify counts
+    const tasks = await stateManager.getAllTasks();
+    const completed = tasks.filter(t => t.status === "completed");
+    const failed = tasks.filter(t => t.status === "failed");
+    const pending = tasks.filter(t => t.status === "pending");
+
+    expect(completed).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect(pending).toHaveLength(1);
+    expect(tasks).toHaveLength(3);
+  });
+
+  // ============================================================
+  // Test 9: State initialization with different worker runtimes
+  // ============================================================
+
+  it("state initializes correctly with codex worker runtime", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Codex runtime test", "conduct/codex-runtime", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "codex",
+    });
+
+    expect(stateManager.get().worker_runtime).toBe("codex");
+
+    // Save and reload to verify persistence
+    await stateManager.save();
+
+    const statePath = path.join(tempDir, ORCHESTRATOR_DIR, "state.json");
+    const stateContent = await fs.readFile(statePath, "utf-8");
+    const persistedState = JSON.parse(stateContent);
+
+    expect(persistedState.worker_runtime).toBe("codex");
+  });
+
+  // ============================================================
+  // Test 10: High max_cycles boundary
+  // ============================================================
+
+  it("high max_cycles value (100) initializes correctly", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("High max cycles test", "conduct/high-max-cycles", {
+      maxCycles: 100,
+      concurrency: 10,
+      workerRuntime: "claude",
+    });
+
+    const state = stateManager.get();
+    expect(state.max_cycles).toBe(100);
+    expect(state.concurrency).toBe(10);
+    expect(state.current_cycle).toBe(0);
+  });
+});
