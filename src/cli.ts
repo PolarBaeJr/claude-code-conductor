@@ -22,6 +22,17 @@ import { validateBounds } from "./utils/validation.js";
 import { validateStateJsonLenient } from "./utils/state-schema.js";
 
 // ============================================================
+// Module-level state
+// ============================================================
+
+/**
+ * Flag to prevent re-entrancy during shutdown.
+ * First SIGINT/SIGTERM triggers graceful shutdown.
+ * Second signal forces immediate exit (standard Unix pattern).
+ */
+let shutdownInProgress = false;
+
+// ============================================================
 // Helpers
 // ============================================================
 
@@ -323,7 +334,13 @@ program
       const orchestrator = new Orchestrator(options);
 
       // Graceful shutdown on SIGINT/SIGTERM (#19)
+      // Double-SIGINT protection: second signal forces immediate exit
       const shutdown = async () => {
+        if (shutdownInProgress) {
+          console.log('\nForce exit (second signal)');
+          process.exit(1);
+        }
+        shutdownInProgress = true;
         console.log('\nGraceful shutdown initiated...');
         try {
           await orchestrator.shutdown();
@@ -666,7 +683,13 @@ program
       const orchestrator = new Orchestrator(options);
 
       // Graceful shutdown on SIGINT/SIGTERM (#19)
+      // Double-SIGINT protection: second signal forces immediate exit
       const shutdown = async () => {
+        if (shutdownInProgress) {
+          console.log('\nForce exit (second signal)');
+          process.exit(1);
+        }
+        shutdownInProgress = true;
         console.log('\nGraceful shutdown initiated...');
         try {
           await orchestrator.shutdown();
