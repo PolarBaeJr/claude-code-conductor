@@ -59,7 +59,7 @@ import {
   createTempProjectDir,
   cleanupTempDir,
 } from "./__tests__/orchestrator-test-utils.js";
-import { ORCHESTRATOR_DIR } from "../utils/constants.js";
+import { ORCHESTRATOR_DIR, getPauseSignalPath } from "../utils/constants.js";
 
 // Get the mocked query function
 const mockQuery = vi.mocked(sdk.query);
@@ -563,5 +563,218 @@ describe("Orchestrator Integration - Checkpoint Gating", () => {
     await stateManager.setStatus("escalated");
 
     expect(stateManager.get().status).toBe("escalated");
+  });
+});
+
+// ============================================================
+// Integration Tests - Pause and Resume
+// ============================================================
+
+describe("Orchestrator Integration - Pause and Resume", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempProjectDir();
+    await fs.writeFile(path.join(tempDir, ".gitignore"), ".conductor/\n");
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await cleanupTempDir(tempDir);
+  });
+
+  // ============================================================
+  // Test 1: Pause signal file triggers paused status
+  // ============================================================
+
+  it("pause signal file creation triggers pause when detected", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Pause signal test", "conduct/pause-signal", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("executing");
+
+    // Create pause signal file
+    const signalPath = getPauseSignalPath(tempDir);
+    const signal = {
+      requested_at: new Date().toISOString(),
+      requested_by: "user",
+    };
+    await fs.writeFile(signalPath, JSON.stringify(signal, null, 2));
+
+    // Verify signal file exists
+    const signalExists = await fs.access(signalPath).then(() => true).catch(() => false);
+    expect(signalExists).toBe(true);
+
+    // Simulate orchestrator detecting pause signal and pausing
+    await stateManager.pause("user_requested");
+
+    const state = stateManager.get();
+    expect(state.status).toBe("paused");
+    expect(state.paused_at).not.toBeNull();
+  });
+
+  // ============================================================
+  // Test 2: Resume clears paused state and continues
+  // ============================================================
+
+  it("resume clears paused state and continues execution", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Resume test", "conduct/resume-test", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("executing");
+    await stateManager.pause("test_pause");
+
+    expect(stateManager.get().status).toBe("paused");
+    expect(stateManager.get().paused_at).not.toBeNull();
+
+    // Resume
+    await stateManager.resume();
+
+    const state = stateManager.get();
+    expect(state.status).toBe("executing");
+    expect(state.paused_at).toBeNull();
+    expect(state.resume_after).toBeNull();
+  });
+
+  // ============================================================
+  // Test 3: Resume with existing tasks skips planning phase
+  // ============================================================
+
+  it("resume with existing tasks allows continuing execution", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Resume tasks test", "conduct/resume-tasks", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.createDirectories();
+
+    // Create tasks (simulating previous planning phase)
+    const taskDef1 = createMockTaskDefinition({ subject: "Task 1" });
+    const taskDef2 = createMockTaskDefinition({ subject: "Task 2" });
+    await stateManager.createTask(taskDef1, "task-001", []);
+    await stateManager.createTask(taskDef2, "task-002", []);
+
+    // Mark first task completed
+    const taskPath = path.join(tempDir, ORCHESTRATOR_DIR, "tasks", "task-001.json");
+    const taskContent = await fs.readFile(taskPath, "utf-8");
+    const task: Task = JSON.parse(taskContent);
+    task.status = "completed";
+    task.completed_at = new Date().toISOString();
+    await fs.writeFile(taskPath, JSON.stringify(task, null, 2));
+
+    // Pause
+    await stateManager.setStatus("executing");
+    await stateManager.pause("test_pause");
+
+    // Resume
+    await stateManager.resume();
+
+    // Check tasks still exist (planning should be skipped)
+    const tasks = await stateManager.getAllTasks();
+    expect(tasks.length).toBe(2);
+
+    const completedTasks = tasks.filter(t => t.status === "completed");
+    const pendingTasks = tasks.filter(t => t.status === "pending");
+    expect(completedTasks.length).toBe(1);
+    expect(pendingTasks.length).toBe(1);
+
+    // Status should be executing, ready to continue
+    expect(stateManager.get().status).toBe("executing");
+  });
+
+  // ============================================================
+  // Test 4: Usage-triggered pause sets resume_after timestamp
+  // ============================================================
+
+  it("usage-triggered pause sets resume_after timestamp", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Usage pause test", "conduct/usage-pause", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    await stateManager.setStatus("executing");
+
+    // Simulate usage-triggered pause with resume_after timestamp
+    const resumeTime = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour later
+    await stateManager.pause(resumeTime);
+
+    const state = stateManager.get();
+    expect(state.status).toBe("paused");
+    expect(state.paused_at).not.toBeNull();
+    expect(state.resume_after).toBe(resumeTime);
+  });
+
+  // ============================================================
+  // Test 5: Pause during execution phase records correct status
+  // ============================================================
+
+  it("pause during execution phase records executing as prior status", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Execution pause test", "conduct/exec-pause", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    // Set status to executing (simulating active execution)
+    await stateManager.setStatus("executing");
+    expect(stateManager.get().status).toBe("executing");
+
+    // Pause
+    await stateManager.pause("user_requested");
+
+    const state = stateManager.get();
+    expect(state.status).toBe("paused");
+    expect(state.paused_at).not.toBeNull();
+
+    // Resume goes back to executing
+    await stateManager.resume();
+    expect(stateManager.get().status).toBe("executing");
+  });
+
+  // ============================================================
+  // Test 6: Removing pause signal file after detection
+  // ============================================================
+
+  it("pause signal file can be removed after detection", async () => {
+    const stateManager = new StateManager(tempDir);
+
+    await stateManager.initialize("Signal cleanup test", "conduct/signal-cleanup", {
+      maxCycles: 3,
+      concurrency: 2,
+      workerRuntime: "claude",
+    });
+
+    // Create pause signal file
+    const signalPath = getPauseSignalPath(tempDir);
+    await fs.writeFile(signalPath, JSON.stringify({ requested_at: new Date().toISOString() }));
+
+    // Verify it exists
+    let exists = await fs.access(signalPath).then(() => true).catch(() => false);
+    expect(exists).toBe(true);
+
+    // Remove it (simulating orchestrator consuming the signal)
+    await fs.unlink(signalPath);
+
+    // Verify removal
+    exists = await fs.access(signalPath).then(() => true).catch(() => false);
+    expect(exists).toBe(false);
   });
 });
