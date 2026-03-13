@@ -9,22 +9,7 @@
 
 import type { ProjectConventions, TaskType, WorkerRuntime, ClaudeModelTier } from "./utils/types.js";
 import { getPersona, formatPersonaPrompt } from "./worker-personas.js";
-
-/**
- * Sanitize user-provided prompt content to prevent injection and keep size bounded (H33).
- * Strips role markers that could confuse the model and truncates to a reasonable limit.
- */
-function sanitizePromptSection(content: string, maxLength: number = 10_000): string {
-  if (!content) return "";
-  let sanitized = content;
-  // Strip role markers that could confuse the model
-  sanitized = sanitized.replace(/\b(Human|Assistant|System):/gi, "[removed]:");
-  // Truncate
-  if (sanitized.length > maxLength) {
-    sanitized = sanitized.substring(0, maxLength) + "\n[truncated]";
-  }
-  return sanitized;
-}
+import { sanitizePromptSection } from "./utils/sanitize.js";
 
 export interface WorkerPromptContext {
   sessionId: string;

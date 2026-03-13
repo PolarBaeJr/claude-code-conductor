@@ -314,12 +314,14 @@ describe("FlowTracer writeFileSecure (H26)", () => {
 // ============================================================
 
 describe("flow-worker-prompt sanitization (H25)", () => {
-  it("flow-worker-prompt.ts contains sanitizeConfigValue function", async () => {
+  it("flow-worker-prompt.ts imports sanitizeConfigValue from shared module", async () => {
     const sourceCode = await fs.readFile(
       path.join(process.cwd(), "src/flow-worker-prompt.ts"),
       "utf-8",
     );
-    expect(sourceCode).toContain("function sanitizeConfigValue");
+    expect(sourceCode).toContain("sanitizeConfigValue");
+    // Should import from the shared sanitize module
+    expect(sourceCode).toContain("from \"./utils/sanitize.js\"");
   });
 
   it("flow-worker-prompt.ts sanitizes actor types", async () => {

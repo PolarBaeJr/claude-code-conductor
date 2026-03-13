@@ -131,11 +131,23 @@ describe("getWorkerPrompt sanitization (H33)", () => {
 // ============================================================
 
 describe("sanitizePromptSection function verification", () => {
-  it("worker-prompt.ts contains sanitizePromptSection function", async () => {
+  it("worker-prompt.ts imports sanitizePromptSection from shared sanitize module", async () => {
     const { readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
     const source = await readFile(
       join(process.cwd(), "src/worker-prompt.ts"),
+      "utf-8",
+    );
+    // Should import sanitizePromptSection from the shared module
+    expect(source).toContain("sanitizePromptSection");
+    expect(source).toContain("from \"./utils/sanitize.js\"");
+  });
+
+  it("shared sanitize.ts contains sanitizePromptSection with role marker handling", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const source = await readFile(
+      join(process.cwd(), "src/utils/sanitize.ts"),
       "utf-8",
     );
     expect(source).toContain("function sanitizePromptSection");

@@ -23,6 +23,7 @@ import {
 
 import { getFlowWorkerPrompt } from "../flow-worker-prompt.js";
 import { loadFlowConfig } from "../utils/flow-config.js";
+import { sanitizeConfigValue } from "../utils/sanitize.js";
 import type { Logger } from "../utils/logger.js";
 import { mkdirSecure, writeFileSecure } from "../utils/secure-fs.js";
 
@@ -63,7 +64,7 @@ export class FlowTracer {
     cycle: number,
   ): Promise<FlowTracingReport> {
     // Load project-specific flow config (or generic defaults)
-    const config = await loadFlowConfig(this.projectDir);
+    const config = await loadFlowConfig(this.projectDir, this.logger);
 
     // Ensure flow-tracing directory exists with secure permissions
     const flowDir = getFlowTracingDir(this.projectDir);
@@ -245,6 +246,7 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
       { allowedTools: ["Read", "Glob", "Grep", "LSP"], cwd: this.projectDir, maxTurns: 15, model: this.model, extendedContext: this.extendedContext, settingSources: ["project"] },
       5 * 60 * 1000, // 5 min
       "flow-extraction",
+      this.logger,
     );
 
     return this.parseFlowSpecs(resultText);
@@ -349,6 +351,7 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
         { allowedTools: FLOW_TRACING_READ_ONLY_TOOLS, cwd: this.projectDir, maxTurns: FLOW_TRACING_WORKER_MAX_TURNS, model: this.model, extendedContext: this.extendedContext, settingSources: ["project"], abortController: workerAbort },
         10 * 60 * 1000, // 10 min
         `flow-tracing-${flow.id}`,
+        this.logger,
       );
 
       // H26: Save raw output for debugging with secure permissions
@@ -702,22 +705,5 @@ export function findBalancedJsonArray(text: string): string | null {
   return null;
 }
 
-/**
- * H25: Sanitize a config string value before injecting into a prompt.
- * Prevents prompt injection by truncating and stripping role markers.
- *
- * Exported for testing.
- */
-export function sanitizeConfigValue(value: string, maxLength: number = 200): string {
-  if (!value) return "";
-  let sanitized = value;
-  // Strip role markers that could confuse the model
-  sanitized = sanitized.replace(/Human:|Assistant:|System:/gi, "[removed]");
-  // Strip markdown headers to prevent prompt structure manipulation
-  sanitized = sanitized.replace(/^#{1,6}\s/gm, "");
-  // Truncate
-  if (sanitized.length > maxLength) {
-    sanitized = sanitized.substring(0, maxLength) + "…";
-  }
-  return sanitized;
-}
+// Re-export sanitizeConfigValue for backward compatibility (tests import from flow-tracer).
+export { sanitizeConfigValue } from "../utils/sanitize.js";
