@@ -56,6 +56,45 @@ After completing your analysis, output EXACTLY one JSON block in this format:
 If you find no examples for a category, use an empty array. Be specific and cite actual file paths or patterns you found. Do NOT guess -- only report what you actually find in the codebase.`;
 
 /**
+ * M-35: Attempt to parse JSON, returning null on failure instead of throwing.
+ */
+function tryParseJson(text: string, warn: (msg: string) => void): Record<string, unknown> | null {
+  try {
+    const result: unknown = JSON.parse(text);
+    if (result !== null && typeof result === "object" && !Array.isArray(result)) {
+      return result as Record<string, unknown>;
+    }
+    return null;
+  } catch (error) {
+    warn(
+      `JSON parse attempt failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return null;
+  }
+}
+
+/**
+ * M-35: Attempt to fix common JSON issues from LLM output:
+ * - Trailing commas before ] or }
+ * - Comments (// style)
+ * - Leading/trailing non-JSON content
+ */
+function tryFixJson(text: string): string {
+  let fixed = text;
+  // Strip single-line comments (// ...)
+  fixed = fixed.replace(/\/\/[^\n]*/g, "");
+  // Remove trailing commas before ] or }
+  fixed = fixed.replace(/,\s*([}\]])/g, "$1");
+  // Try to extract just the outermost {} block if there's surrounding text
+  const braceStart = fixed.indexOf("{");
+  const braceEnd = fixed.lastIndexOf("}");
+  if (braceStart >= 0 && braceEnd > braceStart) {
+    fixed = fixed.substring(braceStart, braceEnd + 1);
+  }
+  return fixed;
+}
+
+/**
  * Extract project conventions by spawning a read-only SDK agent.
  * Results are cached to .conductor/conventions.json.
  * If cached and less than 1 hour old, returns cached version.
@@ -125,38 +164,38 @@ function parseConventionsOutput(text: string, logger?: Logger): ProjectConventio
   const jsonBlockMatch = text.match(/```json\s*\n([\s\S]*?)\n\s*```/);
   const jsonText = jsonBlockMatch ? jsonBlockMatch[1] : text;
 
-  try {
-    const parsed = JSON.parse(jsonText.trim());
+  // M-35: Try multiple parsing strategies instead of all-or-nothing
+  const parsed = tryParseJson(jsonText.trim(), warn) ?? tryParseJson(tryFixJson(jsonText.trim()), warn);
 
-    // Validate the structure and fill in missing fields
-    const conventions: ProjectConventions = {
-      auth_patterns: Array.isArray(parsed.auth_patterns) ? parsed.auth_patterns : [],
-      validation_patterns: Array.isArray(parsed.validation_patterns) ? parsed.validation_patterns : [],
-      error_handling_patterns: Array.isArray(parsed.error_handling_patterns) ? parsed.error_handling_patterns : [],
-      test_patterns: Array.isArray(parsed.test_patterns) ? parsed.test_patterns : [],
-      directory_structure: Array.isArray(parsed.directory_structure) ? parsed.directory_structure : [],
-      naming_conventions: Array.isArray(parsed.naming_conventions) ? parsed.naming_conventions : [],
-      key_libraries: Array.isArray(parsed.key_libraries) ? parsed.key_libraries : [],
-      security_invariants: Array.isArray(parsed.security_invariants) ? parsed.security_invariants : [],
-    };
-
-    // Warn if critical security_invariants field is empty
-    if (conventions.security_invariants.length === 0) {
-      warn(
-        "Conventions extraction found no security_invariants. " +
-        "Consider reviewing the codebase manually for security patterns."
-      );
-    }
-
-    return conventions;
-  } catch (error) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     // Log first 500 chars of raw output to help debug parse failures
     const preview = text.substring(0, 500);
     warn(
       `Failed to parse conventions JSON from agent output; using defaults.\n` +
-      `Parse error: ${error instanceof Error ? error.message : String(error)}\n` +
       `Raw output preview (first 500 chars):\n${preview}`
     );
     return { ...DEFAULT_CONVENTIONS };
   }
+
+  // Validate the structure and fill in missing fields
+  const conventions: ProjectConventions = {
+    auth_patterns: Array.isArray(parsed.auth_patterns) ? parsed.auth_patterns : [],
+    validation_patterns: Array.isArray(parsed.validation_patterns) ? parsed.validation_patterns : [],
+    error_handling_patterns: Array.isArray(parsed.error_handling_patterns) ? parsed.error_handling_patterns : [],
+    test_patterns: Array.isArray(parsed.test_patterns) ? parsed.test_patterns : [],
+    directory_structure: Array.isArray(parsed.directory_structure) ? parsed.directory_structure : [],
+    naming_conventions: Array.isArray(parsed.naming_conventions) ? parsed.naming_conventions : [],
+    key_libraries: Array.isArray(parsed.key_libraries) ? parsed.key_libraries : [],
+    security_invariants: Array.isArray(parsed.security_invariants) ? parsed.security_invariants : [],
+  };
+
+  // Warn if critical security_invariants field is empty
+  if (conventions.security_invariants.length === 0) {
+    warn(
+      "Conventions extraction found no security_invariants. " +
+      "Consider reviewing the codebase manually for security patterns."
+    );
+  }
+
+  return conventions;
 }
