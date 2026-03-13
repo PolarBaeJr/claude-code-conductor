@@ -740,3 +740,96 @@ describe("formatAnalyticsForDisplay", () => {
     expect(output).not.toContain("### Phase Durations");
   });
 });
+
+// ============================================================
+// H-4 fix: flush() race condition — flushPromise nulled in finally
+// ============================================================
+
+describe("EventLog H-4 fix: flush race condition", () => {
+  let tempDir: string;
+  let eventLog: EventLog;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "conductor-h4-test-"));
+    await fs.mkdir(path.join(tempDir, ORCHESTRATOR_DIR), { recursive: true });
+    eventLog = new EventLog(tempDir);
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    if (eventLog.isRunning()) {
+      await eventLog.stop();
+    }
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("concurrent flush calls do not drop events", async () => {
+    eventLog.start();
+
+    // Record several events
+    for (let i = 0; i < 10; i++) {
+      eventLog.record({
+        type: "task_claimed",
+        task_id: `task-${i}`,
+        session_id: `session-${i}`,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Fire multiple concurrent flushes
+    await Promise.all([
+      eventLog.flush(),
+      eventLog.flush(),
+      eventLog.flush(),
+    ]);
+
+    // All events should be persisted
+    const events = await eventLog.readAll();
+    expect(events.length).toBe(10);
+  });
+
+  it("flush after failed write does not permanently block", async () => {
+    eventLog.start();
+
+    // Record an event and flush normally
+    eventLog.record({
+      type: "task_claimed",
+      task_id: "task-1",
+      session_id: "session-1",
+      timestamp: new Date().toISOString(),
+    });
+    await eventLog.flush();
+
+    // Record more events
+    eventLog.record({
+      type: "task_completed",
+      task_id: "task-2",
+      session_id: "session-2",
+      timestamp: new Date().toISOString(),
+    });
+
+    // Flush should succeed (flushPromise was properly nulled in finally)
+    await eventLog.flush();
+
+    const events = await eventLog.readAll();
+    expect(events.length).toBe(2);
+  });
+
+  it("source code nulls flushPromise in finally block", async () => {
+    const source = await fs.readFile(
+      path.join(process.cwd(), "src/core/event-log.ts"),
+      "utf-8",
+    );
+
+    // Find the flush method
+    const flushStart = source.indexOf("async flush()");
+    expect(flushStart).toBeGreaterThan(-1);
+
+    // Use a larger window to capture the full flush method including try/finally block
+    const flushBody = source.substring(flushStart, flushStart + 800);
+
+    // H-4 FIX: flushPromise must be nulled in a finally block
+    expect(flushBody).toContain("finally");
+    expect(flushBody).toContain("this.flushPromise = null");
+  });
+});

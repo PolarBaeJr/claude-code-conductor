@@ -782,3 +782,67 @@ describe("handleRecordDecision - concurrent writes (H8/H9)", () => {
     expect(lines.length).toBe(5);
   });
 });
+
+// ============================================================
+// H-12: register_contract task_id parameter for accurate provenance
+// ============================================================
+
+describe("handleRegisterContract - H-12 task_id parameter", () => {
+  it("uses task_id as owner_task_id when provided", async () => {
+    const result = await handleRegisterContract({
+      contract_id: "h12-test-contract",
+      contract_type: "type_definition",
+      spec: "interface TestType { id: string; }",
+      task_id: "task-042",
+    });
+
+    // Should succeed
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) {
+      // H-12: owner_task_id should be set to the provided task_id
+      expect(result.owner_task_id).toBe("task-042");
+      // registered_by should still be the session ID
+      expect(result.registered_by).toBe("test-session-123");
+    }
+
+    // Verify the persisted contract file also has the correct owner_task_id
+    const contractFile = path.join(
+      tempDir,
+      ".conductor",
+      "contracts",
+      "h12-test-contract.json",
+    );
+    const persisted = JSON.parse(await fs.readFile(contractFile, "utf-8"));
+    expect(persisted.owner_task_id).toBe("task-042");
+    expect(persisted.registered_by).toBe("test-session-123");
+  });
+
+  it("falls back to session ID when task_id is not provided", async () => {
+    const result = await handleRegisterContract({
+      contract_id: "h12-fallback-contract",
+      contract_type: "api_endpoint",
+      spec: "POST /api/test",
+    });
+
+    // Should succeed
+    expect("error" in result).toBe(false);
+    if (!("error" in result)) {
+      // Without task_id, owner_task_id should fall back to sessionId
+      expect(result.owner_task_id).toBe("test-session-123");
+      expect(result.registered_by).toBe("test-session-123");
+    }
+  });
+
+  it("source code accepts task_id in RegisterContractInput interface", async () => {
+    const source = await fs.readFile(
+      path.join(process.cwd(), "src/mcp/tools.ts"),
+      "utf-8",
+    );
+
+    // H-12: Interface should declare optional task_id
+    expect(source).toMatch(/task_id\?:\s*string/);
+
+    // H-12: owner_task_id should use task_id with fallback
+    expect(source).toMatch(/owner_task_id:\s*input\.task_id\s*\?\?/);
+  });
+});
