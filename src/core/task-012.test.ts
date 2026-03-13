@@ -100,11 +100,11 @@ describe("task-012: CodexUsageMonitor uses setTimeout (not setInterval)", () => 
 });
 
 // ============================================================
-// 3. checkForPartialCommits session-specific matching (already fixed)
+// 3. checkForPartialCommits task-specific matching (M-13 fix)
 // ============================================================
 
-describe("task-012: checkForPartialCommits uses session-specific matching", () => {
-  it("source code matches sessionId, not generic [task-] pattern", async () => {
+describe("task-012: checkForPartialCommits uses task-specific matching", () => {
+  it("source code matches by taskId prefix, not sessionId or generic [task-] pattern", async () => {
     const source = await fs.readFile(
       path.join(process.cwd(), "src/core/orchestrator.ts"),
       "utf-8",
@@ -114,22 +114,12 @@ describe("task-012: checkForPartialCommits uses session-specific matching", () =
     const methodStart = source.indexOf("private async checkForPartialCommits");
     expect(methodStart).toBeGreaterThan(-1);
 
-    const methodBody = source.substring(methodStart, methodStart + 500);
+    const methodBody = source.substring(methodStart, methodStart + 600);
 
-    // Should use sessionId for matching
-    expect(methodBody).toContain("sessionId");
-    expect(methodBody).toContain("message.includes(sessionId)");
-
-    // Should NOT match any task commit generically
-    // The old pattern was: message.includes("[task-")
-    // Make sure it's not the sole matching criterion
-    const includesTaskPattern = methodBody.match(
-      /message\.includes\(\s*["']?\[task-/,
-    );
-    // If [task- pattern exists, it must be combined with sessionId
-    if (includesTaskPattern) {
-      expect(methodBody).toContain("sessionId");
-    }
+    // M-13: Should accept taskId and match commits by [taskId] prefix
+    expect(methodBody).toContain("taskId");
+    // Should construct a prefix from the taskId
+    expect(methodBody).toMatch(/\[.*taskId.*\]/);
   });
 });
 

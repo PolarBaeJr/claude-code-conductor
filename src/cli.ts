@@ -87,7 +87,20 @@ async function readAllTasks(projectDir: string): Promise<Task[]> {
     if (!entry.endsWith(".json")) continue;
     try {
       const raw = await fs.readFile(path.join(tasksDir, entry), "utf-8");
-      tasks.push(JSON.parse(raw) as Task);
+      const parsed: unknown = JSON.parse(raw);
+      // M-7: Validate required Task fields before pushing
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        "id" in parsed &&
+        typeof (parsed as Record<string, unknown>).id === "string" &&
+        "subject" in parsed &&
+        typeof (parsed as Record<string, unknown>).subject === "string" &&
+        "status" in parsed &&
+        typeof (parsed as Record<string, unknown>).status === "string"
+      ) {
+        tasks.push(parsed as Task);
+      }
     } catch {
       // skip invalid files
     }

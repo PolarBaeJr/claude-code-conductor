@@ -486,7 +486,7 @@ export class WorkerManager implements ExecutionWorkerManager {
       // If no explicit rate limit was detected but the error looks like an
       // unexplained SDK exit (code 1), record it as a suspicious exit.
       // The orchestrator can correlate this with usage data staleness.
-      if (!handle.rateLimitReported && /exited? with code 1\b/i.test(errorMessage)) {
+      if (!handle.rateLimitReported && /\bexit(?:ed)? with code 1\b/i.test(errorMessage)) {
         this.logger.warn(
           `Worker ${sessionId} exited with code 1 (no explicit rate limit). ` +
           `Recording as suspicious exit for staleness correlation.`

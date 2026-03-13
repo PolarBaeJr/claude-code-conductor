@@ -2403,15 +2403,17 @@ export class Orchestrator {
   /**
    * V2: Check if a worker has made partial commits during its session.
    * Used to warn about potentially inconsistent state when a worker times out.
+   *
+   * M-13: Fixed to match by task ID prefix (e.g. "[task-003]") instead of
+   * sessionId, since workers use task IDs in commit messages, not session IDs.
    */
-  private async checkForPartialCommits(sessionId: string): Promise<boolean> {
+  private async checkForPartialCommits(taskId: string): Promise<boolean> {
     try {
       const recentCommits = await this.git.getRecentCommits(10);
-      // H26: Match commits from this specific session only.
-      // Previously `message.includes("[task-")` matched ANY worker's commits,
-      // producing false positives when multiple workers are active.
+      // Match commits from this specific task using the [task-XXX] prefix.
+      const prefix = `[${taskId}]`;
       return recentCommits.some(
-        (message) => message.includes(sessionId),
+        (message) => message.includes(prefix),
       );
     } catch {
       // If git fails, assume no partial work to be safe
