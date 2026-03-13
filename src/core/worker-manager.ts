@@ -229,7 +229,17 @@ export class WorkerManager implements ExecutionWorkerManager {
    * `read_updates` call.
    */
   async signalWindDown(reason: string, resetsAt?: string): Promise<void> {
-    this.logger.info(`Sending wind-down signal to all workers: ${reason}`);
+    // M-18 FIX: Validate reason against the allowed set before casting
+    const VALID_WIND_DOWN_REASONS = new Set(["usage_limit", "cycle_limit", "user_requested"]);
+    let validatedReason: "usage_limit" | "cycle_limit" | "user_requested";
+    if (VALID_WIND_DOWN_REASONS.has(reason)) {
+      validatedReason = reason as "usage_limit" | "cycle_limit" | "user_requested";
+    } else {
+      this.logger.warn(`Invalid wind-down reason '${reason}', defaulting to 'user_requested'`);
+      validatedReason = "user_requested";
+    }
+
+    this.logger.info(`Sending wind-down signal to all workers: ${validatedReason}`);
 
     const messagesDir = path.join(this.orchestratorDir, MESSAGES_DIR);
     await fs.mkdir(messagesDir, { recursive: true });
@@ -238,9 +248,9 @@ export class WorkerManager implements ExecutionWorkerManager {
       id: `orchestrator-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       from: "orchestrator",
       type: "wind_down",
-      content: `Wind down: ${reason}. Please finish your current task, commit your work, and exit cleanly.`,
+      content: `Wind down: ${validatedReason}. Please finish your current task, commit your work, and exit cleanly.`,
       metadata: {
-        reason: reason as "usage_limit" | "cycle_limit" | "user_requested",
+        reason: validatedReason,
         ...(resetsAt ? { resets_at: resetsAt } : {}),
       },
       timestamp: new Date().toISOString(),
@@ -476,7 +486,7 @@ export class WorkerManager implements ExecutionWorkerManager {
       // If no explicit rate limit was detected but the error looks like an
       // unexplained SDK exit (code 1), record it as a suspicious exit.
       // The orchestrator can correlate this with usage data staleness.
-      if (!handle.rateLimitReported && /exited? with code 1\b/i.test(errorMessage)) {
+      if (!handle.rateLimitReported && /\bexit(?:ed)? with code 1\b/i.test(errorMessage)) {
         this.logger.warn(
           `Worker ${sessionId} exited with code 1 (no explicit rate limit). ` +
           `Recording as suspicious exit for staleness correlation.`

@@ -101,11 +101,13 @@ export class GitManager {
   }
 
   /**
-   * Get line-level diff statistics from the base commit to HEAD.
+   * Get line-level diff statistics from the base commit/branch to HEAD.
    * Returns total additions and deletions.
+   *
+   * @param base - The base branch or commit to diff against (e.g. "main")
    */
-  async diffStatFromBase(): Promise<{ additions: number; deletions: number }> {
-    const result = await this.git.diff(["--shortstat", "HEAD"]);
+  async diffStatFromBase(base: string): Promise<{ additions: number; deletions: number }> {
+    const result = await this.git.diff(["--shortstat", `${base}...HEAD`]);
     let additions = 0;
     let deletions = 0;
     const addMatch = result.match(/(\d+) insertion/);

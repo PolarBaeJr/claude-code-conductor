@@ -340,7 +340,7 @@ export class Orchestrator {
           return;
         }
         const workerModelId = MODEL_TIER_TO_ID[this.options.modelConfig.worker];
-        this.conventions = await extractConventions(this.options.project, workerModelId, this.options.modelConfig.extendedContext);
+        this.conventions = await extractConventions(this.options.project, workerModelId, this.options.modelConfig.extendedContext, this.logger);
         this.projectRules = await loadWorkerRules(this.options.project);
         phaseDurations.conventions_ms = Date.now() - conventionsStart;
 
@@ -419,7 +419,7 @@ export class Orchestrator {
             source: "flow_tracing" as const,
             file_path: f.file_path,
             found_in_cycle: cycleNum,
-          })));
+          })), this.logger);
         }
 
         // Phase 4: Checkpoint
@@ -946,7 +946,7 @@ export class Orchestrator {
       this.redirectGuidance = null;
 
       // Build cycle feedback from review issues, flow findings, and known issues
-      const unresolvedIssues = await getUnresolvedIssues(this.options.project);
+      const unresolvedIssues = await getUnresolvedIssues(this.options.project, this.logger);
       const cycleFeedback = this.buildCycleFeedback(codexFeedback, null, unresolvedIssues, cycleNum);
 
       planOutput = await this.planner.replan(
@@ -1067,6 +1067,7 @@ export class Orchestrator {
             { allowedTools: ["Read", "Glob", "Grep", "Write", "Edit", "LSP"], cwd: this.options.project, maxTurns: 20, settingSources: ["project"] },
             10 * 60 * 1000, // 10 min
             `plan-investigator-round-${discussionRound}`,
+            this.logger,
           );
 
           // Guard against empty investigator response
@@ -1406,14 +1407,16 @@ export class Orchestrator {
           // V2: Record worker timeout event (workers exceeded the timeout threshold)
           recordWorkerTimeout(this.eventLog, sessionId, DEFAULT_WORKER_TIMEOUT_MS);
 
-          // Check for partial commits
-          const hasPartialWork = await this.checkForPartialCommits(sessionId);
+          // Record failure with context
+          const currentTask = await this.getWorkerCurrentTask(sessionId);
+
+          // Check for partial commits using the worker's task ID
+          const hasPartialWork = currentTask
+            ? await this.checkForPartialCommits(currentTask.id)
+            : false;
           if (hasPartialWork) {
             this.logger.warn(`Worker ${sessionId} has partial commits - preserving but adding warning`);
           }
-
-          // Record failure with context
-          const currentTask = await this.getWorkerCurrentTask(sessionId);
           if (currentTask && retryTracker) {
             const errorMsg = hasPartialWork
               ? "Worker timed out. WARNING: Partial commits exist and may be inconsistent."
@@ -1661,6 +1664,7 @@ export class Orchestrator {
         { allowedTools: ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "LSP"], cwd: this.options.project, maxTurns: 30, settingSources: ["project"] },
         10 * 60 * 1000, // 10 min
         `code-review-investigator-round-${reviewRound}`,
+        this.logger,
       );
 
       // Guard against empty reviewer response
@@ -1931,7 +1935,7 @@ export class Orchestrator {
     let linesAdded = 0;
     let linesRemoved = 0;
     try {
-      const diffStat = await this.git.diffStatFromBase();
+      const diffStat = await this.git.diffStatFromBase(this.baseBranch);
       linesAdded = diffStat.additions;
       linesRemoved = diffStat.deletions;
     } catch {
@@ -2399,15 +2403,17 @@ export class Orchestrator {
   /**
    * V2: Check if a worker has made partial commits during its session.
    * Used to warn about potentially inconsistent state when a worker times out.
+   *
+   * M-13: Fixed to match by task ID prefix (e.g. "[task-003]") instead of
+   * sessionId, since workers use task IDs in commit messages, not session IDs.
    */
-  private async checkForPartialCommits(sessionId: string): Promise<boolean> {
+  private async checkForPartialCommits(taskId: string): Promise<boolean> {
     try {
       const recentCommits = await this.git.getRecentCommits(10);
-      // H26: Match commits from this specific session only.
-      // Previously `message.includes("[task-")` matched ANY worker's commits,
-      // producing false positives when multiple workers are active.
+      // Match commits from this specific task using the [task-XXX] prefix.
+      const prefix = `[${taskId}]`;
       return recentCommits.some(
-        (message) => message.includes(sessionId),
+        (message) => message.includes(prefix),
       );
     } catch {
       // If git fails, assume no partial work to be safe

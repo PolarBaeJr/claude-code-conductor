@@ -87,7 +87,20 @@ async function readAllTasks(projectDir: string): Promise<Task[]> {
     if (!entry.endsWith(".json")) continue;
     try {
       const raw = await fs.readFile(path.join(tasksDir, entry), "utf-8");
-      tasks.push(JSON.parse(raw) as Task);
+      const parsed: unknown = JSON.parse(raw);
+      // M-7: Validate required Task fields before pushing
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        "id" in parsed &&
+        typeof (parsed as Record<string, unknown>).id === "string" &&
+        "subject" in parsed &&
+        typeof (parsed as Record<string, unknown>).subject === "string" &&
+        "status" in parsed &&
+        typeof (parsed as Record<string, unknown>).status === "string"
+      ) {
+        tasks.push(parsed as Task);
+      }
     } catch {
       // skip invalid files
     }
@@ -347,7 +360,7 @@ const program = new Command();
 program
   .name("conduct")
   .description("Claude Code Conductor -- hierarchical multi-agent orchestration for large features")
-  .version("0.4.0");
+  .version("0.4.1");
 
 // ============================================================
 // start command
@@ -472,8 +485,12 @@ program
       await orchestrator.run();
     } catch (err) {
       // ConductorExitError: orchestrator requested clean exit (e.g. escalation).
-      // The finally block will release the lock, then we exit with the requested code.
+      // H-2 FIX: Release lock before process.exit() to prevent stale locks
       if (err instanceof ConductorExitError) {
+        if (releaseLock) {
+          try { await releaseLock(); } catch { /* best effort */ }
+          releaseLock = undefined;
+        }
         process.exit(err.exitCode);
       }
       const message = err instanceof Error ? err.message : String(err);
@@ -811,6 +828,11 @@ program
       : savedModelConfig;
 
     // Validate bounds for CLI overrides on resume (#20 - security: reject extreme values)
+    // H-3 FIX: Validate concurrency when overridden (matches start command validation)
+    if (opts.concurrency) {
+      const c = parseInt(opts.concurrency as string, 10);
+      validateBounds("concurrency", c, 1, 10);
+    }
     if (opts.usageThreshold) {
       const threshold = parseFloat(opts.usageThreshold as string);
       validateBounds("usageThreshold", threshold, 0.1, 1.0);
@@ -879,7 +901,12 @@ program
 
       await orchestrator.run();
     } catch (err) {
+      // H-2 FIX: Release lock before process.exit() to prevent stale locks
       if (err instanceof ConductorExitError) {
+        if (releaseLock) {
+          try { await releaseLock(); } catch { /* best effort */ }
+          releaseLock = undefined;
+        }
         process.exit(err.exitCode);
       }
       const message = err instanceof Error ? err.message : String(err);

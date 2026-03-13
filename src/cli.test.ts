@@ -265,8 +265,6 @@ describe("usage_threshold in OrchestratorState type and schema", () => {
       claude_usage: null,
       codex_usage: null,
       codex_metrics: null,
-      completed_task_ids: [],
-      failed_task_ids: [],
       active_session_ids: [],
       cycle_history: [],
       progress: "",
@@ -294,5 +292,78 @@ describe("usage_threshold in OrchestratorState type and schema", () => {
     const invalidHigh = { ...validState, usage_threshold: 1.5 };
     const resultHigh = OrchestratorStateSchema.safeParse(invalidHigh);
     expect(resultHigh.success).toBe(false);
+  });
+});
+
+// ============================================================
+// H-2 fix: ConductorExitError catch releases lock before process.exit
+// ============================================================
+
+describe("CLI H-2 fix: ConductorExitError lock release", () => {
+  it("start command releases lock before process.exit on ConductorExitError", async () => {
+    const source = await fs.readFile(
+      path.join(process.cwd(), "src/cli.ts"),
+      "utf-8",
+    );
+
+    // Find the ConductorExitError catch blocks
+    const catches = [...source.matchAll(/ConductorExitError/g)];
+    expect(catches.length).toBeGreaterThanOrEqual(2); // At least start + resume
+
+    // Find all ConductorExitError catch blocks and verify lock release
+    const catchPattern = /instanceof ConductorExitError[\s\S]*?process\.exit/g;
+    const catchBlocks = [...source.matchAll(catchPattern)];
+    expect(catchBlocks.length).toBeGreaterThanOrEqual(2);
+
+    // Each ConductorExitError block should release lock before process.exit
+    for (const block of catchBlocks) {
+      const blockText = block[0];
+      const releaseLockPos = blockText.indexOf("releaseLock");
+      const processExitPos = blockText.indexOf("process.exit");
+      // releaseLock should appear before process.exit
+      expect(releaseLockPos).toBeGreaterThan(-1);
+      expect(releaseLockPos).toBeLessThan(processExitPos);
+    }
+  });
+
+  it("resume command also releases lock before process.exit on ConductorExitError", async () => {
+    const source = await fs.readFile(
+      path.join(process.cwd(), "src/cli.ts"),
+      "utf-8",
+    );
+
+    // Find the resume command section
+    const resumeSection = source.indexOf('.command("resume")');
+    expect(resumeSection).toBeGreaterThan(-1);
+
+    // Get the resume handler body (after resume command, up to end of file)
+    const resumeBody = source.substring(resumeSection);
+
+    // Should have ConductorExitError handling with lock release
+    expect(resumeBody).toContain("ConductorExitError");
+    expect(resumeBody).toContain("releaseLock");
+  });
+});
+
+// ============================================================
+// H-3 fix: Resume command validates concurrency bounds
+// ============================================================
+
+describe("CLI H-3 fix: resume concurrency validation", () => {
+  it("resume command validates concurrency when overridden", async () => {
+    const source = await fs.readFile(
+      path.join(process.cwd(), "src/cli.ts"),
+      "utf-8",
+    );
+
+    // Find the resume command section
+    const resumeSection = source.indexOf('.command("resume")');
+    expect(resumeSection).toBeGreaterThan(-1);
+
+    const resumeBody = source.substring(resumeSection);
+
+    // Should validate concurrency bounds
+    expect(resumeBody).toContain("validateBounds");
+    expect(resumeBody).toContain("concurrency");
   });
 });

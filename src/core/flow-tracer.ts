@@ -23,6 +23,7 @@ import {
 
 import { getFlowWorkerPrompt } from "../flow-worker-prompt.js";
 import { loadFlowConfig } from "../utils/flow-config.js";
+import { sanitizeConfigValue } from "../utils/sanitize.js";
 import type { Logger } from "../utils/logger.js";
 import { mkdirSecure, writeFileSecure } from "../utils/secure-fs.js";
 
@@ -63,7 +64,7 @@ export class FlowTracer {
     cycle: number,
   ): Promise<FlowTracingReport> {
     // Load project-specific flow config (or generic defaults)
-    const config = await loadFlowConfig(this.projectDir);
+    const config = await loadFlowConfig(this.projectDir, this.logger);
 
     // Ensure flow-tracing directory exists with secure permissions
     const flowDir = getFlowTracingDir(this.projectDir);
@@ -99,12 +100,15 @@ export class FlowTracer {
     // incrementally so they survive an overall timeout (Issue #5 fix).
     const partialFindings: FlowFinding[] = [];
 
-    // Create timeout promise to enforce 30-minute overall deadline
+    // M-5: Create timeout promise to enforce 30-minute overall deadline.
+    // Store timer reference so we can clearTimeout after the race resolves,
+    // preventing the timer callback from firing after success.
+    let timeoutTimer: ReturnType<typeof setTimeout>;
     const timeoutPromise = new Promise<"timeout">((resolve) => {
-      const timer = setTimeout(() => resolve("timeout"), FLOW_TRACING_OVERALL_TIMEOUT_MS);
+      timeoutTimer = setTimeout(() => resolve("timeout"), FLOW_TRACING_OVERALL_TIMEOUT_MS);
       // Unref timer so it doesn't prevent process exit
-      if (timer.unref) {
-        timer.unref();
+      if (timeoutTimer.unref) {
+        timeoutTimer.unref();
       }
     });
 
@@ -113,6 +117,11 @@ export class FlowTracer {
       tracingPromise.then((findings) => ({ type: "success" as const, findings })),
       timeoutPromise.then(() => ({ type: "timeout" as const })),
     ]);
+
+    // M-5: Clear the timeout timer now that the race has resolved.
+    // Without this, the timer would fire after a successful trace and
+    // resolve the (now unconsumed) timeoutPromise unnecessarily.
+    clearTimeout(timeoutTimer!);
 
     let allFindings: FlowFinding[];
     if (raceResult.type === "timeout") {
@@ -245,6 +254,7 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
       { allowedTools: ["Read", "Glob", "Grep", "LSP"], cwd: this.projectDir, maxTurns: 15, model: this.model, extendedContext: this.extendedContext, settingSources: ["project"] },
       5 * 60 * 1000, // 5 min
       "flow-extraction",
+      this.logger,
     );
 
     return this.parseFlowSpecs(resultText);
@@ -349,6 +359,7 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
         { allowedTools: FLOW_TRACING_READ_ONLY_TOOLS, cwd: this.projectDir, maxTurns: FLOW_TRACING_WORKER_MAX_TURNS, model: this.model, extendedContext: this.extendedContext, settingSources: ["project"], abortController: workerAbort },
         10 * 60 * 1000, // 10 min
         `flow-tracing-${flow.id}`,
+        this.logger,
       );
 
       // H26: Save raw output for debugging with secure permissions
@@ -378,24 +389,80 @@ Output ONLY the JSON array, wrapped in the json code fence. Aim for 3-8 flows ma
       const parsed = JSON.parse(jsonStr);
 
       if (!Array.isArray(parsed)) {
-        this.logger.warn("Flow extraction did not return an array; wrapping.");
-        return [parsed as FlowSpec];
+        // M-4: Validate non-array JSON instead of blindly wrapping
+        const f = parsed as Record<string, unknown>;
+        if (!this.isValidFlowSpec(f)) {
+          this.logger.warn("Flow extraction did not return a valid flow spec.");
+          return [];
+        }
+        return [this.normalizeFlowSpec(f)];
       }
 
-      // Validate each flow has required fields
-      return parsed.filter((f: Record<string, unknown>) => {
-        if (!f.id || !f.name || !f.entry_points || !f.actors) {
-          this.logger.warn(`Skipping malformed flow spec: ${JSON.stringify(f).substring(0, 100)}`);
-          return false;
-        }
-        return true;
-      }) as FlowSpec[];
+      // M-4: Validate each flow has required fields with proper type and length checks.
+      // Truthiness alone passes for empty arrays/strings; check types and lengths.
+      return parsed
+        .filter((f: Record<string, unknown>) => {
+          if (!this.isValidFlowSpec(f)) {
+            this.logger.warn(`Skipping malformed flow spec: ${JSON.stringify(f).substring(0, 100)}`);
+            return false;
+          }
+          return true;
+        })
+        .map((f: Record<string, unknown>) => this.normalizeFlowSpec(f));
     } catch (err) {
       this.logger.error(
         `Failed to parse flow specs: ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
     }
+  }
+
+  /**
+   * M-4: Validate that a parsed object has all required FlowSpec fields
+   * with correct types, including that array elements are strings.
+   */
+  private isValidFlowSpec(f: Record<string, unknown>): boolean {
+    // Check id and name are non-empty strings
+    if (typeof f.id !== "string" || !f.id) return false;
+    if (typeof f.name !== "string" || !f.name) return false;
+
+    // Check entry_points is a non-empty array of strings
+    if (!Array.isArray(f.entry_points) || f.entry_points.length === 0) return false;
+    if (!f.entry_points.every((e: unknown) => typeof e === "string" && e)) return false;
+
+    // Check actors is a non-empty array of strings
+    if (!Array.isArray(f.actors) || f.actors.length === 0) return false;
+    if (!f.actors.every((a: unknown) => typeof a === "string" && a)) return false;
+
+    return true;
+  }
+
+  /**
+   * M-4: Normalize a validated flow spec object to a proper FlowSpec.
+   * Filters out non-string elements from arrays to prevent runtime crashes.
+   */
+  private normalizeFlowSpec(f: Record<string, unknown>): FlowSpec {
+    // Filter arrays to only include non-empty strings
+    const entry_points = (f.entry_points as unknown[])
+      .filter((e): e is string => typeof e === "string" && !!e);
+    const actors = (f.actors as unknown[])
+      .filter((a): a is string => typeof a === "string" && !!a);
+
+    // Handle edge_cases: default to [], filter to strings only
+    let edge_cases: string[] = [];
+    if (Array.isArray(f.edge_cases)) {
+      edge_cases = (f.edge_cases as unknown[])
+        .filter((e): e is string => typeof e === "string" && !!e);
+    }
+
+    return {
+      id: f.id as string,
+      name: f.name as string,
+      description: typeof f.description === "string" ? f.description : "",
+      entry_points,
+      actors,
+      edge_cases,
+    };
   }
 
   /**
@@ -702,22 +769,5 @@ export function findBalancedJsonArray(text: string): string | null {
   return null;
 }
 
-/**
- * H25: Sanitize a config string value before injecting into a prompt.
- * Prevents prompt injection by truncating and stripping role markers.
- *
- * Exported for testing.
- */
-export function sanitizeConfigValue(value: string, maxLength: number = 200): string {
-  if (!value) return "";
-  let sanitized = value;
-  // Strip role markers that could confuse the model
-  sanitized = sanitized.replace(/Human:|Assistant:|System:/gi, "[removed]");
-  // Strip markdown headers to prevent prompt structure manipulation
-  sanitized = sanitized.replace(/^#{1,6}\s/gm, "");
-  // Truncate
-  if (sanitized.length > maxLength) {
-    sanitized = sanitized.substring(0, maxLength) + "…";
-  }
-  return sanitized;
-}
+// Re-export sanitizeConfigValue for backward compatibility (tests import from flow-tracer).
+export { sanitizeConfigValue } from "../utils/sanitize.js";

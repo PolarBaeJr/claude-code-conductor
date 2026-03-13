@@ -100,11 +100,11 @@ describe("task-012: CodexUsageMonitor uses setTimeout (not setInterval)", () => 
 });
 
 // ============================================================
-// 3. checkForPartialCommits session-specific matching (already fixed)
+// 3. checkForPartialCommits task-specific matching (M-13 fix)
 // ============================================================
 
-describe("task-012: checkForPartialCommits uses session-specific matching", () => {
-  it("source code matches sessionId, not generic [task-] pattern", async () => {
+describe("task-012: checkForPartialCommits uses task-specific matching", () => {
+  it("source code matches by taskId prefix, not sessionId or generic [task-] pattern", async () => {
     const source = await fs.readFile(
       path.join(process.cwd(), "src/core/orchestrator.ts"),
       "utf-8",
@@ -114,22 +114,12 @@ describe("task-012: checkForPartialCommits uses session-specific matching", () =
     const methodStart = source.indexOf("private async checkForPartialCommits");
     expect(methodStart).toBeGreaterThan(-1);
 
-    const methodBody = source.substring(methodStart, methodStart + 500);
+    const methodBody = source.substring(methodStart, methodStart + 600);
 
-    // Should use sessionId for matching
-    expect(methodBody).toContain("sessionId");
-    expect(methodBody).toContain("message.includes(sessionId)");
-
-    // Should NOT match any task commit generically
-    // The old pattern was: message.includes("[task-")
-    // Make sure it's not the sole matching criterion
-    const includesTaskPattern = methodBody.match(
-      /message\.includes\(\s*["']?\[task-/,
-    );
-    // If [task- pattern exists, it must be combined with sessionId
-    if (includesTaskPattern) {
-      expect(methodBody).toContain("sessionId");
-    }
+    // M-13: Should accept taskId and match commits by [taskId] prefix
+    expect(methodBody).toContain("taskId");
+    // Should construct a prefix from the taskId
+    expect(methodBody).toMatch(/\[.*taskId.*\]/);
   });
 });
 
@@ -379,7 +369,7 @@ describe("task-012: clearTaskFiles on replan", () => {
 // ============================================================
 
 describe("task-012: handleGetTasks applies status_filter when ranked=true", () => {
-  it("source code applies status_filter after ranking", async () => {
+  it("source code handles status_filter with ranked=true correctly (H-11)", async () => {
     const source = await fs.readFile(
       path.join(process.cwd(), "src/mcp/tools.ts"),
       "utf-8",
@@ -393,16 +383,15 @@ describe("task-012: handleGetTasks applies status_filter when ranked=true", () =
 
     const funcBody = source.substring(funcStart, funcStart + 1500);
 
-    // Should apply status_filter after ranking
+    // Should handle status_filter
     expect(funcBody).toContain("input.status_filter");
 
-    // There should be a filter after rankClaimableTasks
-    const rankPos = funcBody.indexOf("rankClaimableTasks");
-    const filterPos = funcBody.indexOf(
-      "ranked.filter",
-      rankPos,
-    );
-    expect(filterPos).toBeGreaterThan(rankPos);
+    // H-11: When status_filter is non-pending with ranked=true,
+    // should skip ranking entirely and just filter by status.
+    // This is the correct fix — ranking only returns pending tasks,
+    // so a non-pending filter after ranking was always empty.
+    expect(funcBody).toContain('status_filter !== "pending"');
+    expect(funcBody).toContain("rankClaimableTasks");
   });
 });
 

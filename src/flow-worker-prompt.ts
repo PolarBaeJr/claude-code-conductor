@@ -8,24 +8,7 @@
  */
 
 import type { FlowSpec, FlowConfig } from "./utils/types.js";
-
-/**
- * H25: Sanitize a config string value before injecting into a prompt.
- * Prevents prompt injection by truncating and stripping role markers.
- */
-function sanitizeConfigValue(value: string, maxLength: number = 200): string {
-  if (!value) return "";
-  let sanitized = value;
-  // Strip role markers that could confuse the model
-  sanitized = sanitized.replace(/Human:|Assistant:|System:/gi, "[removed]");
-  // Strip markdown headers to prevent prompt structure manipulation
-  sanitized = sanitized.replace(/^#{1,6}\s/gm, "");
-  // Truncate
-  if (sanitized.length > maxLength) {
-    sanitized = sanitized.substring(0, maxLength) + "…";
-  }
-  return sanitized;
-}
+import { sanitizeConfigValue } from "./utils/sanitize.js";
 
 export function getFlowWorkerPrompt(flow: FlowSpec, changedFiles: string[], config: FlowConfig): string {
   // H25: Sanitize user-controlled config values before injecting into prompt

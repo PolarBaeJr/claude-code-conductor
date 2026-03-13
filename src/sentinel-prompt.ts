@@ -2,6 +2,8 @@
  * Shared sentinel prompt builder used by both WorkerManager and CodexWorkerManager.
  * The sentinel is a READ-ONLY worker that monitors completed tasks for security issues.
  */
+import { sanitizeConfigValue } from "./utils/sanitize.js";
+
 export function getSentinelPrompt(securityInvariants?: string[]): string {
   const invariantsSection = securityInvariants && securityInvariants.length > 0
     ? [
@@ -11,7 +13,8 @@ export function getSentinelPrompt(securityInvariants?: string[]): string {
         "The following security invariants have been established for this project.",
         "Flag any violations of these as HIGH or CRITICAL severity:",
         "",
-        ...securityInvariants.map((inv) => `- ${inv}`),
+        // H-1 FIX: Sanitize each invariant to strip role markers and markdown headers
+        ...securityInvariants.map((inv) => `- ${sanitizeConfigValue(inv, 500)}`),
       ].join("\n")
     : "";
 
