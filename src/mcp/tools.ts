@@ -169,17 +169,34 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 
 /**
  * Safely read a JSONL file. Returns empty array if the file doesn't exist.
+ * Malformed JSON lines are skipped with a warning (C3 fix).
  */
-async function readJsonlFile<T>(filePath: string): Promise<T[]> {
+export async function readJsonlFile<T>(filePath: string): Promise<T[]> {
   try {
     const content = await fs.readFile(filePath, "utf-8");
     const lines = content.trim().split("\n").filter(Boolean);
-    return lines.map((line) => JSON.parse(line) as T);
+    const results: T[] = [];
+    for (const line of lines) {
+      try {
+        results.push(JSON.parse(line) as T);
+      } catch {
+        // Skip malformed lines - log warning but don't crash
+        console.warn(
+          `[readJsonlFile] Skipping malformed JSON line in ${filePath}: ${line.substring(0, 100)}`,
+        );
+      }
+    }
+    return results;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return [];
     }
-    throw err;
+    // For other read errors (permissions, etc.), log and return empty array
+    // rather than crashing the entire MCP server
+    console.warn(
+      `[readJsonlFile] Error reading ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return [];
   }
 }
 
