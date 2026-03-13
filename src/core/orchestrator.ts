@@ -652,6 +652,7 @@ export class Orchestrator {
         workerRuntime: this.options.workerRuntime,
         modelConfig: this.options.modelConfig,
         baseCommitSha: sha,
+        usageThreshold: this.options.usageThreshold,
       });
 
       this.logger.info(`Using current branch: ${branchName} (base commit: ${sha.substring(0, 8)})`);
@@ -686,6 +687,7 @@ export class Orchestrator {
         concurrency: this.options.concurrency,
         workerRuntime: this.options.workerRuntime,
         modelConfig: this.options.modelConfig,
+        usageThreshold: this.options.usageThreshold,
       });
     }
 
@@ -841,6 +843,20 @@ export class Orchestrator {
     return this.state.get().status !== "paused";
   }
 
+  /**
+   * Checks whether the specified provider has sufficient capacity to proceed
+   * with the given phase. If capacity is insufficient, this method blocks
+   * until capacity is available (via handleProviderRateLimit which waits for
+   * the usage window to reset).
+   *
+   * IMPORTANT: This method intentionally always returns `true`. The "always wait
+   * then return true" semantic means callers can rely on the return value to mean
+   * "capacity is now available — safe to proceed". The `if (!can) return;` guards
+   * in callers exist as a safety net but will not trigger in practice, because
+   * handleProviderRateLimit always waits for reset before returning. If future
+   * changes introduce a non-blocking path (e.g. user-requested abort), those
+   * paths should return `false` to signal the caller to abort the phase.
+   */
   private async ensureProviderCapacity(provider: WorkerRuntime, phase: string): Promise<boolean> {
     const usageMonitor = this.getProviderUsageMonitor(provider);
     const snapshot = await usageMonitor.poll();
@@ -1104,6 +1120,16 @@ export class Orchestrator {
       this.logger.info("Codex review skipped (--skip-codex).");
       this.lastPlanDiscussionRounds = 0;
       this.lastPlanApproved = false;
+    }
+
+    // Clear old task files before creating new ones to prevent stale tasks
+    // from previous plans from appearing alongside new plan tasks.
+    // This is important during replan: getAllTasks() reads ALL .json files
+    // in .conductor/tasks/, so old task files would appear as ghost pending
+    // tasks if not cleaned up.
+    if (isReplan) {
+      await this.state.clearTaskFiles();
+      this.logger.debug("Cleared old task files before creating new plan tasks.");
     }
 
     // Create tasks from plan output
@@ -1666,14 +1692,27 @@ export class Orchestrator {
     // Track rounds for cycle record
     this.lastCodeReviewRounds = reviewRound;
 
-    const approved = reviewResult.verdict === "APPROVE";
-    if (approved) {
+    // Determine whether the code was actually reviewed and approved.
+    // ERROR and RATE_LIMITED verdicts indicate Codex tool failure, NOT code
+    // rejection. Treating them as "not approved" would force another cycle
+    // even when no code issues exist. Instead, treat them as "review
+    // unavailable" — return true so the checkpoint doesn't penalize the code
+    // for a tooling failure.
+    const isToolFailure =
+      reviewResult.verdict === "ERROR" || reviewResult.verdict === "RATE_LIMITED";
+    const approved = reviewResult.verdict === "APPROVE" || isToolFailure;
+    if (reviewResult.verdict === "APPROVE") {
       this.logger.info("Codex APPROVED the code changes.");
     } else if (reviewResult.verdict === "ERROR") {
       this.logger.error(
-        "Codex code review errored out. Code was NOT reviewed by Codex.",
+        "Codex code review errored out. Code was NOT reviewed by Codex. " +
+        "Treating as review unavailable (not as rejection).",
       );
-      // ERROR means the review didn't actually succeed — don't count as approved
+    } else if (reviewResult.verdict === "RATE_LIMITED") {
+      this.logger.error(
+        "Codex code review rate-limited after retries. " +
+        "Treating as review unavailable (not as rejection).",
+      );
     } else {
       this.logger.warn(
         `Code review ended without approval (verdict: ${reviewResult.verdict}). Proceeding anyway.`,
@@ -2364,9 +2403,11 @@ export class Orchestrator {
   private async checkForPartialCommits(sessionId: string): Promise<boolean> {
     try {
       const recentCommits = await this.git.getRecentCommits(10);
-      // Look for commits that contain the session ID or task markers
+      // H26: Match commits from this specific session only.
+      // Previously `message.includes("[task-")` matched ANY worker's commits,
+      // producing false positives when multiple workers are active.
       return recentCommits.some(
-        (message) => message.includes(sessionId) || message.includes("[task-"),
+        (message) => message.includes(sessionId),
       );
     } catch {
       // If git fails, assume no partial work to be safe

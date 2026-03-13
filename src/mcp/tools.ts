@@ -352,7 +352,15 @@ export async function handleGetTasks(
   if (input.ranked) {
     // rankClaimableTasks filters to pending tasks with completed deps
     // and returns them sorted by priority score descending
-    return rankClaimableTasks(tasks);
+    let ranked = rankClaimableTasks(tasks);
+
+    // H28: Apply status_filter after ranking if provided.
+    // Previously status_filter was silently ignored when ranked=true.
+    if (input.status_filter) {
+      ranked = ranked.filter((t) => t.status === input.status_filter);
+    }
+
+    return ranked;
   }
 
   // Default: sort by id

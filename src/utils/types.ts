@@ -46,6 +46,7 @@ export interface OrchestratorState {
   active_session_ids: string[];
   cycle_history: CycleRecord[];
   progress: string;
+  usage_threshold?: number; // Wind-down usage threshold (0-1), preserved across resume
 }
 
 export type OrchestratorStatus =

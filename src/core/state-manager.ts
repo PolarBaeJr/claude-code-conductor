@@ -53,6 +53,7 @@ export class StateManager {
       workerRuntime: "claude" | "codex";
       modelConfig?: ModelConfig;
       baseCommitSha?: string;
+      usageThreshold?: number;
     },
   ): Promise<OrchestratorState> {
     const now = new Date().toISOString();
@@ -87,6 +88,7 @@ export class StateManager {
       active_session_ids: [],
       cycle_history: [],
       progress: "",
+      usage_threshold: options.usageThreshold,
     };
 
     await this.save();
@@ -417,6 +419,35 @@ export class StateManager {
       }
     }
     return tasks;
+  }
+
+  /**
+   * Remove all task files from the tasks directory.
+   * Called before creating new tasks during replanning to prevent stale
+   * task files from previous plans from appearing alongside new ones.
+   *
+   * Only removes .json files (task files). Other file types are left alone.
+   * Errors on individual file deletions are logged but do not halt the operation.
+   */
+  async clearTaskFiles(): Promise<void> {
+    const tasksDir = getTasksDir(this.projectDir);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(tasksDir);
+    } catch {
+      return; // Directory doesn't exist yet — nothing to clear
+    }
+
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      try {
+        await fs.unlink(path.join(tasksDir, entry));
+      } catch (err) {
+        console.warn(
+          `[state-manager] Failed to remove old task file ${entry}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   /**

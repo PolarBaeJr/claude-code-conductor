@@ -733,6 +733,7 @@ program
   .description("Resume a paused conductor run")
   .option("-p, --project <dir>", "Project directory", process.cwd())
   .option("-c, --concurrency <n>", "Number of parallel workers")
+  .option("--usage-threshold <n>", "Wind-down usage threshold (0-1)")
   .option("--skip-codex", "Skip Codex reviews", false)
   .option("--skip-flow-review", "Skip flow-tracing review phase", false)
   .option("--worker-runtime <runtime>", "Worker execution backend: claude or codex", parseWorkerRuntime)
@@ -809,6 +810,12 @@ program
         }
       : savedModelConfig;
 
+    // Validate bounds for CLI overrides on resume (#20 - security: reject extreme values)
+    if (opts.usageThreshold) {
+      const threshold = parseFloat(opts.usageThreshold as string);
+      validateBounds("usageThreshold", threshold, 0.1, 1.0);
+    }
+
     const options: CLIOptions = {
       project: projectDir,
       feature: state.feature,
@@ -816,7 +823,9 @@ program
         ? parseInt(opts.concurrency as string, 10)
         : state.concurrency,
       maxCycles: state.max_cycles,
-      usageThreshold: DEFAULT_USAGE_THRESHOLD,
+      usageThreshold: opts.usageThreshold
+        ? parseFloat(opts.usageThreshold as string)
+        : state.usage_threshold ?? DEFAULT_USAGE_THRESHOLD,
       skipCodex: Boolean(opts.skipCodex),
       skipFlowReview: Boolean(opts.skipFlowReview),
       dryRun: false,

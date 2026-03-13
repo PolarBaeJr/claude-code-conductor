@@ -64,13 +64,15 @@ export function sanitizeErrorForPrompt(error: string): string {
   }
 
   // Escape markdown special characters that could affect formatting
+  // H29: Include # to prevent heading injection in markdown prompts
   sanitized = sanitized
     .replace(/\\/g, "\\\\")
     .replace(/\*/g, "\\*")
     .replace(/_/g, "\\_")
     .replace(/`/g, "\\`")
     .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]");
+    .replace(/\]/g, "\\]")
+    .replace(/#/g, "\\#");
 
   // Truncate to 500 characters
   if (sanitized.length > 500) {
