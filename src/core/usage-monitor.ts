@@ -1,5 +1,7 @@
 import os from "os";
 import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { readOAuthToken as sharedReadOAuthToken } from "../utils/oauth-token.js";
 import {
   DEFAULT_USAGE_THRESHOLD,
@@ -27,6 +29,30 @@ import { Logger } from "../utils/logger.js";
 // Node.js 20+ native fetch uses undici internally, which has Keep-Alive enabled
 // by default with connection pooling. No additional configuration is needed.
 // See: https://nodejs.org/docs/latest-v20.x/api/globals.html#fetch
+
+const execFileAsync = promisify(execFile);
+
+// Cache the Claude Code version for User-Agent header.
+// The usage API applies different rate limit buckets based on User-Agent;
+// "claude-code/<version>" gets a generous bucket vs the strict default.
+let cachedClaudeVersion: string | null = null;
+
+async function getClaudeCodeVersion(): Promise<string> {
+  if (cachedClaudeVersion) return cachedClaudeVersion;
+  try {
+    const { stdout } = await execFileAsync("claude", ["--version"], { timeout: 5000 });
+    // Output format: "2.1.74 (Claude Code)"
+    const match = stdout.trim().match(/^([\d.]+)/);
+    if (match) {
+      cachedClaudeVersion = match[1];
+      return cachedClaudeVersion;
+    }
+  } catch {
+    // claude CLI not found or timed out — fall back to generic version
+  }
+  cachedClaudeVersion = "0.0.0";
+  return cachedClaudeVersion;
+}
 
 const DEFAULT_SNAPSHOT: UsageSnapshot = {
   five_hour: 0,
@@ -234,6 +260,7 @@ export class UsageMonitor implements ProviderUsageMonitor {
     }
 
     let lastError: string | null = null;
+    const ccVersion = await getClaudeCodeVersion();
 
     for (let attempt = 0; attempt < USAGE_MONITOR_MAX_RETRIES; attempt++) {
       try {
@@ -242,6 +269,7 @@ export class UsageMonitor implements ProviderUsageMonitor {
           headers: {
             Authorization: `Bearer ${token}`,
             "anthropic-beta": USAGE_API_BETA_HEADER,
+            "User-Agent": `claude-code/${ccVersion}`,
           },
         });
 
