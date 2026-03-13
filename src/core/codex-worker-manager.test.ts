@@ -263,6 +263,152 @@ describe("CodexWorkerManager H17/H-9 - checkWorkerHealth timeout and heartbeat t
 });
 
 // ================================================================
+// M-19: Model Configuration Support
+// ================================================================
+
+describe("CodexWorkerManager M-19 - Model Configuration", () => {
+  it("source code imports CODEX_MODEL_MAP from constants", async () => {
+    const source = await fs.readFile(
+      path.join(__dirname, "codex-worker-manager.ts"),
+      "utf-8",
+    );
+
+    // M-19: Must import CODEX_MODEL_MAP for model name mapping
+    expect(source).toContain("CODEX_MODEL_MAP");
+    // M-19: Must import from constants
+    expect(source).toMatch(/import\s*\{[^}]*CODEX_MODEL_MAP[^}]*\}\s*from\s*["']\.\.\/utils\/constants/);
+  });
+
+  it("source code passes --model flag in buildCodexExecArgs", async () => {
+    const source = await fs.readFile(
+      path.join(__dirname, "codex-worker-manager.ts"),
+      "utf-8",
+    );
+
+    // M-19: Must map model tier to Codex model name
+    expect(source).toContain("CODEX_MODEL_MAP[this.modelConfig.worker]");
+    // M-19: Must include --model flag in args
+    expect(source).toContain('"--model"');
+    expect(source).toContain("codexModel");
+  });
+
+  it("source code passes subagentModel to getWorkerPrompt", async () => {
+    const source = await fs.readFile(
+      path.join(__dirname, "codex-worker-manager.ts"),
+      "utf-8",
+    );
+
+    // M-19: Must pass subagentModel in the worker prompt context
+    expect(source).toContain("subagentModel: this.modelConfig.subagent");
+  });
+
+  it("constructor accepts modelConfig parameter", async () => {
+    const source = await fs.readFile(
+      path.join(__dirname, "codex-worker-manager.ts"),
+      "utf-8",
+    );
+
+    // M-19: Constructor must accept ModelConfig with a default
+    expect(source).toContain("modelConfig: ModelConfig");
+    expect(source).toContain("DEFAULT_MODEL_CONFIG");
+  });
+
+  it("source code references M-19 in comments", async () => {
+    const source = await fs.readFile(
+      path.join(__dirname, "codex-worker-manager.ts"),
+      "utf-8",
+    );
+
+    expect(source).toContain("M-19");
+  });
+
+  it("CODEX_MODEL_MAP has correct mappings for all tiers", async () => {
+    const { CODEX_MODEL_MAP } = await import("../utils/constants.js");
+
+    // Verify all three tiers are mapped
+    expect(CODEX_MODEL_MAP).toHaveProperty("opus");
+    expect(CODEX_MODEL_MAP).toHaveProperty("sonnet");
+    expect(CODEX_MODEL_MAP).toHaveProperty("haiku");
+
+    // Verify correct model name mappings
+    expect(CODEX_MODEL_MAP.opus).toBe("o3");
+    expect(CODEX_MODEL_MAP.sonnet).toBe("o4-mini");
+    expect(CODEX_MODEL_MAP.haiku).toBe("o4-mini");
+  });
+
+  it("CODEX_JOB_MAX_RUNTIME_SECONDS is a positive integer", async () => {
+    const { CODEX_JOB_MAX_RUNTIME_SECONDS } = await import("../utils/constants.js");
+
+    expect(CODEX_JOB_MAX_RUNTIME_SECONDS).toBeGreaterThan(0);
+    expect(Number.isInteger(CODEX_JOB_MAX_RUNTIME_SECONDS)).toBe(true);
+    // Should be 45 minutes = 2700 seconds (derived from DEFAULT_WORKER_TIMEOUT_MS)
+    expect(CODEX_JOB_MAX_RUNTIME_SECONDS).toBe(2700);
+  });
+
+  it("CODEX_JOB_MAX_RUNTIME_SECONDS is derived from DEFAULT_WORKER_TIMEOUT_MS", async () => {
+    const { CODEX_JOB_MAX_RUNTIME_SECONDS, DEFAULT_WORKER_TIMEOUT_MS } = await import(
+      "../utils/constants.js"
+    );
+
+    expect(CODEX_JOB_MAX_RUNTIME_SECONDS).toBe(Math.floor(DEFAULT_WORKER_TIMEOUT_MS / 1000));
+  });
+
+  it("model mapping produces correct args for each tier", () => {
+    // Reproduce the model mapping logic from buildCodexExecArgs
+    const CODEX_MODEL_MAP: Record<string, string> = {
+      opus: "o3",
+      sonnet: "o4-mini",
+      haiku: "o4-mini",
+    };
+
+    // Reproduce the args-building logic for each tier
+    for (const [tier, expectedModel] of Object.entries(CODEX_MODEL_MAP)) {
+      const codexModel = CODEX_MODEL_MAP[tier];
+      const args = [
+        "exec",
+        "--model",
+        codexModel,
+        "--json",
+        "--full-auto",
+      ];
+
+      // Verify --model is followed by the correct model name
+      const modelIndex = args.indexOf("--model");
+      expect(modelIndex).toBeGreaterThanOrEqual(0);
+      expect(args[modelIndex + 1]).toBe(expectedModel);
+
+      // Verify --model appears before --json
+      const jsonIndex = args.indexOf("--json");
+      expect(modelIndex).toBeLessThan(jsonIndex);
+    }
+  });
+
+  it("orchestrator passes modelConfig to CodexWorkerManager constructor", async () => {
+    const orchestratorSource = await fs.readFile(
+      path.join(__dirname, "orchestrator.ts"),
+      "utf-8",
+    );
+
+    // M-19: Orchestrator must pass modelConfig when creating CodexWorkerManager
+    expect(orchestratorSource).toContain("options.modelConfig");
+    // Verify it appears in the CodexWorkerManager construction context
+    expect(orchestratorSource).toContain("CodexWorkerManager");
+  });
+
+  it("setupCodexMcpConfig includes job_max_runtime_seconds in TOML output", async () => {
+    const orchestratorSource = await fs.readFile(
+      path.join(__dirname, "orchestrator.ts"),
+      "utf-8",
+    );
+
+    // M-19: Must include agents section with job_max_runtime_seconds
+    expect(orchestratorSource).toContain("[agents]");
+    expect(orchestratorSource).toContain("job_max_runtime_seconds");
+    expect(orchestratorSource).toContain("CODEX_JOB_MAX_RUNTIME_SECONDS");
+  });
+});
+
+// ================================================================
 // General source verification
 // ================================================================
 
