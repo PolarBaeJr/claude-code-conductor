@@ -44,21 +44,25 @@ Use the AskUserQuestion tool to confirm configuration. Use a **two-step flow**:
 
 **If the user selects "Use all defaults"**, proceed with defaults. Do not ask further config questions.
 
-**If the user selects "Customize"**, ask a follow-up multiSelect question:
-- "Which settings do you want to change?" with options:
+**If the user selects "Customize"**, ask **two** follow-up multiSelect questions (AskUserQuestion allows max 4 options each):
+
+**Question 1**: "Which core settings do you want to change?" with options:
   - **Concurrency** (default: 2 parallel workers)
   - **Worker runtime** (default: Claude workers; switch to Codex CLI workers)
   - **Model selection** (default: opus for workers, sonnet for subagents)
   - **Max cycles** (default: 5 cycles before escalating)
+
+**Question 2**: "Any other settings to change?" with options:
   - **Skip Codex** (default: No -- Codex reviews plans and code each cycle)
   - **Skip flow-review** (default: No -- set to yes to skip flow-tracing security review phase)
   - **Current branch** (default: No -- set to yes to work on current branch instead of creating conduct/<slug>)
-  - **Dry run** (default: No -- set to yes to only generate the plan without executing)
-  - **Monitor interval** (default: 15 minutes -- how often to auto-check conductor status)
-- Then ask specific follow-up questions for each selected setting.
+  - **Dry run / Monitor interval** (default: No dry run, 15-min status checks)
 
-**If "Monitor interval" is chosen**, ask:
-- "How often should I check on the conductor?" Options: 5 minutes (frequent updates, good for short runs), 10 minutes, 15 minutes (default, good balance), 30 minutes (less frequent, good for long runs). Default: 15 minutes.
+Both questions can be asked in a single AskUserQuestion call (the tool supports up to 4 questions per call). Then ask specific follow-up questions for each selected setting.
+
+**If "Dry run / Monitor interval" is chosen**, ask which they want to change:
+- **Dry run**: "Enable dry run mode? (only generate the plan, don't execute)" Options: Yes, No. Default: No.
+- **Monitor interval**: "How often should I check on the conductor?" Options: 5 minutes (frequent updates, good for short runs), 10 minutes, 15 minutes (default, good balance), 30 minutes (less frequent, good for long runs). Default: 15 minutes.
 
 **If "Model selection" is chosen**, ask:
 - **Worker model**: "Which model for workers (planner, execution, flow tracing)?" Options: opus (most capable, highest cost), sonnet (balanced), haiku (fastest, cheapest). Default: opus.
