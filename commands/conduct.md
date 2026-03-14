@@ -40,7 +40,7 @@ Use the AskUserQuestion tool to confirm configuration. Use a **two-step flow**:
 
 **First**, ask a single question:
 - "Do you want to use all default conductor settings, or customize?"
-- Options: "Use all defaults" (description: "2 workers, Claude runtime, 5 max cycles, Codex reviews on") and "Customize" (description: "I want to change one or more settings")
+- Options: "Use all defaults" (description: "2 workers, Claude runtime, 5 max cycles, Codex reviews on, 15-min status checks") and "Customize" (description: "I want to change one or more settings")
 
 **If the user selects "Use all defaults"**, proceed with defaults. Do not ask further config questions.
 
@@ -54,7 +54,11 @@ Use the AskUserQuestion tool to confirm configuration. Use a **two-step flow**:
   - **Skip flow-review** (default: No -- set to yes to skip flow-tracing security review phase)
   - **Current branch** (default: No -- set to yes to work on current branch instead of creating conduct/<slug>)
   - **Dry run** (default: No -- set to yes to only generate the plan without executing)
+  - **Monitor interval** (default: 15 minutes -- how often to auto-check conductor status)
 - Then ask specific follow-up questions for each selected setting.
+
+**If "Monitor interval" is chosen**, ask:
+- "How often should I check on the conductor?" Options: 5 minutes (frequent updates, good for short runs), 10 minutes, 15 minutes (default, good balance), 30 minutes (less frequent, good for long runs). Default: 15 minutes.
 
 **If "Model selection" is chosen**, ask:
 - **Worker model**: "Which model for workers (planner, execution, flow tracing)?" Options: opus (most capable, highest cost), sonnet (balanced), haiku (fastest, cheapest). Default: opus.
@@ -139,17 +143,17 @@ Tell the user the conductor has launched and give them these commands to monitor
 
 ### Step 6: Start automatic monitoring
 
-After launching, immediately set up a recurring check using **CronCreate** to monitor the conductor every 15 minutes:
+After launching, immediately set up a recurring check using **CronCreate** to monitor the conductor. Use the configured monitor interval (default: 15 minutes). Convert the interval to a cron expression (e.g., 5m → `*/5 * * * *`, 15m → `*/15 * * * *`, 30m → `*/30 * * * *`):
 
 ```
 CronCreate(
-  cron: "*/15 * * * *",
+  cron: "*/<interval_minutes> * * * *",
   prompt: "Check on the conductor run: run `conduct status --project \"$(pwd)\"` and report progress. If status is COMPLETED, cancel this cron job with CronDelete, show the final results summary, and check if there is a conduct/ branch to merge. If status is FAILED, check the logs with `tail -30 .conductor/logs/conductor.log` and either resume or report the error. If status is PAUSED, check for escalation files.",
   recurring: true
 )
 ```
 
-Tell the user you've set up automatic monitoring and will check every 15 minutes. Include the cron job ID so they can cancel it manually if needed.
+Tell the user you've set up automatic monitoring at the configured interval. Include the cron job ID so they can cancel it manually if needed.
 
 ## Phase 3: Monitor for Escalations
 
