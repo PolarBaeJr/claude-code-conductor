@@ -154,6 +154,7 @@ function createTestOptions(projectDir: string, overrides: Partial<CLIOptions> = 
     usageThreshold: 0.8,
     skipCodex: true, // Skip Codex by default to simplify tests
     skipFlowReview: true, // Skip flow review by default
+    skipDesignSpecUpdate: true, // Skip design spec update by default
     dryRun: false,
     resume: false,
     verbose: false,

@@ -7,7 +7,7 @@
  * project rules, feature context, threat model, and task-type guidance.
  */
 
-import type { ProjectConventions, TaskType, WorkerRuntime, ClaudeModelTier } from "./utils/types.js";
+import type { ProjectConventions, TaskType, WorkerRuntime, ClaudeModelTier, DesignSpec } from "./utils/types.js";
 import { getPersona, formatPersonaPrompt } from "./worker-personas.js";
 import { sanitizePromptSection, sanitizeConfigValue } from "./utils/sanitize.js";
 
@@ -22,6 +22,7 @@ export interface WorkerPromptContext {
   taskType?: TaskType;
   projectGuidance?: string; // V2: Auto-detected project guidance
   subagentModel?: ClaudeModelTier; // Model tier for subagents spawned by this worker
+  designSpec?: DesignSpec; // V2: Frontend design system spec from `conduct init`
 }
 
 export function getWorkerPrompt(context: WorkerPromptContext): string {
@@ -84,7 +85,8 @@ ${windDownExtraSteps.join("\n")}
 ${internalTeamGuidance.join("\n")}
 - **Report errors.** If you encounter a blocking error, post it via \`post_update\` with type "error". Then try to work around it or move to the next task.
 - **Commit incrementally.** Don't batch all changes into one massive commit. Commit after each logical unit of work within a task.
-- **Respect the codebase.** Follow existing patterns, conventions, and coding style. Read nearby files to understand the conventions before writing new code.`);
+- **Respect the codebase.** Follow existing patterns, conventions, and coding style. Read nearby files to understand the conventions before writing new code.
+- **Never modify shared components to fit a single use case.** If a reusable UI component (button, input, card, etc.) doesn't match the style you need, add a new **variant** using the project's existing variant pattern — do not change the component's default styles. Use \`findReferences\` to check how many places consume a component before editing it.`);
 
   // ------------------------------------------------------------------
   // 2. Security Constitution (always included)
@@ -275,6 +277,13 @@ ${sanitizePromptSection(context.threatModelSummary)}`);
   }
 
   // ------------------------------------------------------------------
+  // 9.5. Design Spec (conditional — frontend_ui workers only)
+  // ------------------------------------------------------------------
+  if (context.designSpec && context.taskType === "frontend_ui") {
+    lines.push(formatDesignSpecForPrompt(context.designSpec));
+  }
+
+  // ------------------------------------------------------------------
   // 10. MCP Coordination Tools
   // ------------------------------------------------------------------
   lines.push(`## MCP Coordination Tools
@@ -296,3 +305,76 @@ Before implementing an API endpoint or shared type, call \`get_contracts\` to ch
   return lines.join("\n\n");
 }
 
+/**
+ * Format the design spec for injection into frontend_ui worker prompts.
+ */
+function formatDesignSpecForPrompt(spec: DesignSpec): string {
+  const lines: string[] = [];
+
+  lines.push("## Project Design System");
+  lines.push("");
+  lines.push(
+    "This project has a design system analysis. Use this as your reference when working with components. " +
+    "**NEVER modify the base/default styles of shared primitives — always add a new variant instead.**"
+  );
+
+  // Shared primitives
+  if (spec.shared_primitives.length > 0) {
+    lines.push("");
+    lines.push("### Shared Primitives (DO NOT modify base styles)");
+    lines.push("");
+    for (const p of spec.shared_primitives) {
+      lines.push(
+        `- **${sanitizeConfigValue(p.name, 100)}** (\`${sanitizeConfigValue(p.file_path, 200)}\`): ` +
+        `${p.variant_count} variants` +
+        (p.size_count ? `, ${p.size_count} sizes` : "") +
+        `, ~${p.consumers} consumers` +
+        ` — approach: ${sanitizeConfigValue(p.variant_approach, 100)}`
+      );
+    }
+  }
+
+  // Variant system
+  lines.push("");
+  lines.push("### Variant System");
+  lines.push(`- **Approach:** ${sanitizeConfigValue(spec.variant_system.approach, 100)}`);
+  if (spec.variant_system.libraries.length > 0) {
+    lines.push(`- **Libraries:** ${spec.variant_system.libraries.map(l => sanitizeConfigValue(l, 100)).join(", ")}`);
+  }
+
+  // Show concrete examples of how to add variants
+  if (spec.variant_system.examples.length > 0) {
+    lines.push("");
+    lines.push("### How to Add a Variant (follow these patterns)");
+    for (const ex of spec.variant_system.examples.slice(0, 3)) {
+      lines.push(
+        `- **${sanitizeConfigValue(ex.component, 100)}** (\`${sanitizeConfigValue(ex.file_path, 200)}\`): ` +
+        `${sanitizeConfigValue(ex.pattern, 300)} — ` +
+        `existing variants: ${ex.variants.map(v => sanitizeConfigValue(v, 50)).join(", ")}`
+      );
+    }
+  }
+
+  // Theming
+  if (spec.theming.approach !== "none") {
+    lines.push("");
+    lines.push("### Theming");
+    lines.push(`- **Approach:** ${sanitizeConfigValue(spec.theming.approach, 100)}`);
+    if (spec.theming.token_file) {
+      lines.push(`- **Token file:** \`${sanitizeConfigValue(spec.theming.token_file, 200)}\``);
+    }
+    if (spec.theming.color_system) {
+      lines.push(`- **Color system:** ${sanitizeConfigValue(spec.theming.color_system, 200)}`);
+    }
+  }
+
+  // Naming conventions
+  lines.push("");
+  lines.push("### Component Naming Conventions");
+  lines.push(`- **Files:** ${sanitizeConfigValue(spec.naming_conventions.files, 100)}`);
+  lines.push(`- **Components:** ${sanitizeConfigValue(spec.naming_conventions.components, 100)}`);
+  lines.push(`- **Props:** ${sanitizeConfigValue(spec.naming_conventions.props, 100)}`);
+  lines.push(`- **CSS classes:** ${sanitizeConfigValue(spec.naming_conventions.css_classes, 100)}`);
+
+  return lines.join("\n");
+}

@@ -16,6 +16,8 @@ export const FLOW_TRACING_DIR = "flow-tracing";
 export const CONTRACTS_DIR = "contracts";
 export const DECISIONS_FILE = "decisions.jsonl";
 export const CONVENTIONS_FILE = "conventions.json";
+export const DESIGN_SPEC_FILE = "design-spec.json";
+export const RECOMMENDED_CONFIGS_DIR = "recommended-configs";
 export const KNOWN_ISSUES_FILE = "known-issues.json";
 export const RULES_FILE = "rules.md";
 export const WORKER_RULES_FILE = "worker-rules.md";
@@ -48,6 +50,10 @@ export const FLOW_TRACING_OVERALL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes ove
 export const SENTINEL_POLL_INTERVAL_MS = 15_000; // 15 seconds
 export const SENTINEL_WORKER_MAX_TURNS = 200;
 export const CONVENTIONS_EXTRACTION_MAX_TURNS = 20;
+export const DESIGN_SPEC_ANALYZER_MAX_TURNS = 30;
+export const DESIGN_SPEC_ANALYZER_TIMEOUT_MS = 4 * 60 * 1000; // 4 minutes
+export const DESIGN_SPEC_UPDATER_MAX_TURNS = 15;
+export const DESIGN_SPEC_UPDATER_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
 export const INCREMENTAL_REVIEW_MAX_TURNS = 15;
 export const MAX_SEMGREP_RETRIES = 2;
 
@@ -362,6 +368,18 @@ export function getDecisionsPath(projectDir: string): string {
 
 export function getConventionsPath(projectDir: string): string {
   return path.join(projectDir, ORCHESTRATOR_DIR, CONVENTIONS_FILE);
+}
+
+export function getDesignSpecPath(projectDir: string): string {
+  return path.join(projectDir, ORCHESTRATOR_DIR, DESIGN_SPEC_FILE);
+}
+
+export function getRecommendedConfigsDir(projectDir: string): string {
+  return path.join(projectDir, ORCHESTRATOR_DIR, RECOMMENDED_CONFIGS_DIR);
+}
+
+export function getFlowConfigPath(projectDir: string): string {
+  return path.join(projectDir, ORCHESTRATOR_DIR, "flow-config.json");
 }
 
 export function getKnownIssuesPath(projectDir: string): string {

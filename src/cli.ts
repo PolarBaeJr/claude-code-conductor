@@ -363,7 +363,46 @@ const program = new Command();
 program
   .name("conduct")
   .description("Claude Code Conductor -- hierarchical multi-agent orchestration for large features")
-  .version("0.4.5");
+  .version("0.5.0");
+
+// ============================================================
+// init command
+// ============================================================
+
+program
+  .command("init")
+  .description("Initialize conductor configuration for this project")
+  .option("-p, --project <dir>", "Project directory", process.cwd())
+  .option("--force", "Overwrite existing config files instead of writing to recommended-configs/", false)
+  .option("--worker-model <tier>", "Claude model for analysis agents: opus, sonnet, or haiku", parseModelTier)
+  .option("-v, --verbose", "Verbose output", false)
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    const projectDir = path.resolve(opts.project as string);
+
+    console.log(chalk.bold.cyan("\n  Conductor Init\n"));
+
+    try {
+      // Dynamic import to avoid loading init module on every CLI invocation
+      const { runInit } = await import("./core/init.js");
+
+      const modelTier = opts.workerModel as string | undefined;
+      // Map tier to model ID if provided
+      let model: string | undefined;
+      if (modelTier) {
+        const { MODEL_TIER_TO_ID } = await import("./utils/types.js");
+        model = MODEL_TIER_TO_ID[modelTier as keyof typeof MODEL_TIER_TO_ID];
+      }
+
+      await runInit(projectDir, {
+        force: Boolean(opts.force),
+        model,
+        verbose: Boolean(opts.verbose),
+      });
+    } catch (err) {
+      console.error(chalk.red(`\nInit failed: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+  });
 
 // ============================================================
 // start command
@@ -379,6 +418,7 @@ program
   .option("--usage-threshold <n>", "Wind-down usage threshold (0-1)", "0.80")
   .option("--skip-codex", "Skip Codex reviews", false)
   .option("--skip-flow-review", "Skip flow-tracing review phase", false)
+  .option("--skip-design-spec-update", "Skip post-cycle design spec update", false)
   .option("--dry-run", "Plan only, don't execute", false)
   .option("--current-branch", "Work on the current branch instead of creating conduct/<slug>", false)
   .option("--context-file <path>", "Path to pre-gathered context file (skips interactive Q&A)")
@@ -442,6 +482,7 @@ program
       usageThreshold,
       skipCodex: Boolean(opts.skipCodex),
       skipFlowReview: Boolean(opts.skipFlowReview),
+      skipDesignSpecUpdate: Boolean(opts.skipDesignSpecUpdate),
       dryRun: Boolean(opts.dryRun),
       resume: false,
       verbose: Boolean(opts.verbose),
@@ -762,6 +803,7 @@ program
   .option("--usage-threshold <n>", "Wind-down usage threshold (0-1)")
   .option("--skip-codex", "Skip Codex reviews", false)
   .option("--skip-flow-review", "Skip flow-tracing review phase", false)
+  .option("--skip-design-spec-update", "Skip post-cycle design spec update", false)
   .option("--worker-runtime <runtime>", "Worker execution backend: claude or codex", parseWorkerRuntime)
   .option("--worker-model <tier>", "Claude model for workers: opus, sonnet, or haiku", parseModelTier)
   .option("--subagent-model <tier>", "Claude model for subagents: opus, sonnet, or haiku", parseModelTier)
@@ -859,6 +901,7 @@ program
         : state.usage_threshold ?? DEFAULT_USAGE_THRESHOLD,
       skipCodex: Boolean(opts.skipCodex),
       skipFlowReview: Boolean(opts.skipFlowReview),
+      skipDesignSpecUpdate: Boolean(opts.skipDesignSpecUpdate),
       dryRun: false,
       resume: true,
       verbose: Boolean(opts.verbose),

@@ -184,6 +184,7 @@ const FRONTEND_SPECIALIST: WorkerPersona = {
     "API contracts are checked via `get_contracts` to ensure fetch calls match backend expectations",
     "Forms validate inputs and show inline error messages near the invalid field",
     "Components handle responsive breakpoints (mobile, tablet, desktop)",
+    "Before modifying any shared/reusable component, use `findReferences` to check all consumers — if it's used in multiple places, add a variant instead of changing the base styles",
     "No hardcoded strings — text content uses the project's i18n/localization pattern if one exists",
     "Event handlers are debounced/throttled where appropriate (search, resize, scroll)",
     "Images have alt text; decorative images use `alt=\"\"`",
@@ -201,6 +202,8 @@ const FRONTEND_SPECIALIST: WorkerPersona = {
     "Suppressing TypeScript errors with `as any` instead of properly typing props",
     "Not testing with keyboard-only navigation",
     "Creating new components that duplicate existing ones in the design system",
+    "Modifying the default styles of a shared/reusable component to fit a specific use case — this breaks every other place that uses the component. Instead, add a new variant (e.g., via `cva` variants, a `variant` prop, or the project's existing variant pattern) and use that variant at the call site",
+    "Editing a component's base styles when you need a different look — always check how many places consume the component first (use `findReferences`), and if it's used elsewhere, create a variant instead of changing the base",
   ],
   domainGuidance: `**Accessibility (WCAG 2.1 AA):**
 - **Perceivable:** All non-text content has text alternatives. Color is not the sole means of conveying information. Text has a contrast ratio of at least 4.5:1.
@@ -213,6 +216,14 @@ const FRONTEND_SPECIALIST: WorkerPersona = {
 - Keep components focused: one responsibility per component.
 - Separate data fetching from presentation (container/hook + presentational component).
 - Use the existing state management approach (Redux, Zustand, Context, etc.) — don't introduce a new one.
+
+**Component Variants (Critical):**
+Shared/reusable components are used across multiple pages and features. Modifying their base styles breaks every consumer. When a component needs a different visual treatment for a specific context:
+1. **Check consumers first:** Use \`findReferences\` on the component to see everywhere it's used. If it's used in more than one place, do NOT modify the base styles.
+2. **Add a variant:** Use the project's existing variant pattern (e.g., \`cva\` variants with class-variance-authority, a \`variant\` prop, conditional classNames). Add a new named variant that provides the desired styling.
+3. **Use the variant at the call site:** Pass the new variant prop where you need the different look. All existing call sites continue using the default variant unchanged.
+4. **Never modify defaults:** The default variant/styles must remain unchanged so existing consumers are unaffected.
+This applies to ALL shared UI primitives: buttons, inputs, cards, badges, dialogs, etc. If you're unsure whether a component is shared, check its references — assume it's shared until proven otherwise.
 
 **Performance:**
 - Lazy-load routes and heavy components with dynamic imports
