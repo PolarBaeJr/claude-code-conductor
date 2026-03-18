@@ -45,7 +45,33 @@ npm run setup
 
 ## Usage
 
-### Via Claude Code (recommended)
+### Step 1: Initialize your project
+
+Before your first conductor run, initialize the project to generate optimized configuration:
+
+```bash
+conduct init --project /path/to/your/project
+```
+
+This will:
+1. **Detect your stack** -- languages, frameworks, test runners, linters, CI systems
+2. **Generate flow config** -- framework-specific flow-tracing layers (Next.js, React, Vue, Svelte, Angular, Express, FastAPI, etc.)
+3. **Analyze your design system** (if frontend detected) -- shared components, variant patterns (cva, styled-components, etc.), theming, naming conventions
+4. **Scaffold worker rules** -- a `.conductor/rules.md` template for project-specific guidance
+
+If config files already exist, init writes recommended alternatives to `.conductor/recommended-configs/` instead of overwriting. Compare and replace at your discretion.
+
+```bash
+# Re-analyze and overwrite existing configs
+conduct init --project /path/to/your/project --force
+
+# Use a specific model for analysis
+conduct init --project /path/to/your/project --worker-model sonnet
+```
+
+### Step 2: Run the conductor
+
+#### Via Claude Code (recommended)
 
 Open Claude Code in any project and run:
 
@@ -60,7 +86,7 @@ Claude Code will:
 4. Launch the conductor in the background
 5. Monitor for escalations and handle them with you
 
-### Via CLI directly
+#### Via CLI directly
 
 ```bash
 # Start a new conductor run (interactive model selection prompt)
@@ -93,6 +119,15 @@ conduct resume --project /path/to/your/project --verbose
 
 ### CLI Options
 
+**`conduct init`**
+
+| Option | Default | Description |
+|---|---|---|
+| `--project <dir>` | Current directory | Project to initialize |
+| `--force` | `false` | Overwrite existing config files instead of writing to `recommended-configs/` |
+| `--worker-model <tier>` | `opus` | Claude model for analysis agents |
+| `-v, --verbose` | `false` | Verbose logging |
+
 **`conduct start`**
 
 | Option | Default | Description |
@@ -107,6 +142,7 @@ conduct resume --project /path/to/your/project --verbose
 | `--usage-threshold <n>` | `0.80` | Pause when 5-hour usage hits this (0-1) |
 | `--skip-codex` | `false` | Skip Codex plan/code reviews |
 | `--skip-flow-review` | `false` | Skip flow-tracing review phase |
+| `--skip-design-spec-update` | `false` | Skip post-cycle design spec update |
 | `--dry-run` | `false` | Generate plan only, don't execute |
 | `--context-file <path>` | none | Pre-gathered context file (skips interactive Q&A and model prompt) |
 | `--current-branch` | `false` | Work on the current branch instead of creating `conduct/<slug>` |
@@ -124,6 +160,7 @@ conduct resume --project /path/to/your/project --verbose
 | `--concurrency <n>` | saved | Override the saved concurrency |
 | `--skip-codex` | `false` | Skip Codex reviews |
 | `--skip-flow-review` | `false` | Skip flow-tracing review phase |
+| `--skip-design-spec-update` | `false` | Skip post-cycle design spec update |
 | `--force-resume` | `false` | Resume a stale run stuck in a non-paused state (e.g., `executing`) |
 | `--verbose` | `false` | Verbose logging |
 
@@ -157,12 +194,14 @@ Model configuration is persisted to `state.json` and restored on `conduct resume
 ### The Conductor Loop
 
 ```
-plan --> execute (parallel workers) --> code review + flow trace --> checkpoint
-  ^                                                                     |
-  |_____________________ another cycle if issues found _________________|
+init check --> plan --> execute (parallel workers) --> review + flow trace + design spec update --> checkpoint
+                ^                                                                                     |
+                |_____________________________ another cycle if issues found __________________________|
 ```
 
 Each cycle runs through these phases:
+
+0. **Init Check** (first run only) -- Checks for `.conductor/` config files (`flow-config.json`, `design-spec.json`, `rules.md`). If missing, warns the user and suggests running `conduct init`. In non-interactive mode (CI, headless), logs the warning and continues. Everything degrades gracefully without init.
 
 1. **Planning** -- The planner analyzes your codebase and feature description, generates a STRIDE threat model, then decomposes work into typed tasks with security requirements, performance requirements, and acceptance criteria. Anchor tasks (shared foundations) are identified for priority execution. Tasks are written to a draft file and validated with a dedicated MCP tool before acceptance.
 
@@ -170,9 +209,9 @@ Each cycle runs through these phases:
 
 3. **Codex Plan Review** (optional) -- The plan is sent to Codex for discussion. Up to 5 rounds of back-and-forth before the plan is finalized.
 
-4. **Execution** -- Tasks are assigned to parallel headless worker sessions using the selected execution runtime and model. Workers coordinate via a custom MCP server with shared contracts, architectural decisions, and dependency context. A security sentinel worker runs alongside, scanning completed code in real-time. Task scheduling uses priority scoring based on task type, risk level, and critical path depth.
+4. **Execution** -- Tasks are assigned to parallel headless worker sessions using the selected execution runtime and model. Workers coordinate via a custom MCP server with shared contracts, architectural decisions, and dependency context. A security sentinel worker runs alongside, scanning completed code in real-time. Task scheduling uses priority scoring based on task type, risk level, and critical path depth. Frontend UI workers receive the design spec so they know which components are shared and how variants work.
 
-5. **Code Review + Flow Tracing** (parallel) -- Codex reviews the code changes while flow-tracing workers trace user journeys end-to-end across all code layers. Both run simultaneously since they are read-only.
+5. **Code Review + Flow Tracing + Design Spec Update** (parallel) -- Codex reviews the code changes, flow-tracing workers trace user journeys end-to-end across all code layers, and the design spec updater checks if frontend components were added/modified. All three run simultaneously since they are read-only.
 
 6. **Checkpoint** -- The conductor decides whether to ship or loop. If flow tracing found critical/high issues, fix tasks are auto-generated and another cycle begins. If code review was not approved, another cycle begins. Otherwise, the run completes.
 
@@ -191,6 +230,7 @@ Every worker session receives:
 - **Project rules** -- Custom rules from `.conductor/rules.md`.
 - **Threat model** -- Attack surfaces and required mitigations for the feature being built.
 - **Task-type guidelines** -- Specific guidance for security, backend API, frontend UI, database, testing, and infrastructure tasks.
+- **Design system spec** (frontend_ui workers) -- Shared primitives with variant counts and consumer counts, variant system approach (cva, styled-components, etc.), theming info, and naming conventions. Prevents workers from modifying shared component base styles.
 - **Dependency context** -- What completed tasks produced, what sibling tasks are doing, registered contracts and decisions.
 - **Model guidance** -- Which model tier to use when spawning subagents.
 - **Worker personas** -- Task-type-specific personas for focused expertise.
@@ -220,9 +260,10 @@ Workers are monitored for health with automatic recovery:
 ### Security Pipeline
 
 ```
+Init:         Design system analysis --> shared primitives + variant patterns
 Planning:     Threat model (STRIDE) --> security requirements on tasks
 Execution:    Security sentinel (real-time) --> contracts + decisions
-Review:       Codex review + flow tracing (parallel) --> semgrep (static analysis)
+Review:       Codex review + flow tracing + design spec update (parallel) --> semgrep
 Checkpoint:   Gate on results --> auto-generate fix tasks --> known issues registry
 ```
 
@@ -237,24 +278,28 @@ All conductor state lives in `.conductor/` inside your project:
 ```
 your-project/
   .conductor/
-    state.json            # Current run state (includes model config)
-    plan-v1.md            # Generated plan (versioned)
-    tasks-draft.json      # Planner task output (validated before acceptance)
-    conventions.json      # Extracted codebase conventions (cached 1 hour)
-    known-issues.json     # Persistent issue tracking across cycles
-    escalation.json       # Escalation details (if paused)
-    decisions.jsonl       # Architectural decisions log
-    events.jsonl          # Structured event log (phases, workers, tasks)
-    project-profile.json  # Auto-detected project profile (cached)
-    progress.jsonl        # Real-time progress updates
-    conductor.lock        # Process lock (prevents concurrent runs)
-    tasks/                # Individual task files
-    sessions/             # Worker session state
-    messages/             # Inter-worker messages
-    contracts/            # Shared API/type contracts
-    codex-reviews/        # Codex review results
-    flow-tracing/         # Flow tracing reports
-    logs/                 # Conductor and worker logs
+    state.json              # Current run state (includes model config)
+    plan-v1.md              # Generated plan (versioned)
+    tasks-draft.json        # Planner task output (validated before acceptance)
+    conventions.json        # Extracted codebase conventions (cached 1 hour)
+    design-spec.json        # Frontend design system spec (from conduct init)
+    flow-config.json        # Flow-tracing configuration (from conduct init)
+    rules.md                # Custom worker rules (from conduct init or manual)
+    known-issues.json       # Persistent issue tracking across cycles
+    escalation.json         # Escalation details (if paused)
+    decisions.jsonl         # Architectural decisions log
+    events.jsonl            # Structured event log (phases, workers, tasks)
+    project-profile.json    # Auto-detected project profile (cached)
+    progress.jsonl          # Real-time progress updates
+    conductor.lock          # Process lock (prevents concurrent runs)
+    recommended-configs/    # Alternative configs from conduct init (when existing files preserved)
+    tasks/                  # Individual task files
+    sessions/               # Worker session state
+    messages/               # Inter-worker messages
+    contracts/              # Shared API/type contracts
+    codex-reviews/          # Codex review results
+    flow-tracing/           # Flow tracing reports
+    logs/                   # Conductor and worker logs
 ```
 
 ### Configurable Files
@@ -264,6 +309,9 @@ your-project/
 | `.conductor/rules.md` | Custom rules injected into every worker prompt. Use this for project-specific conventions like "always use `secureHandler`" or "never use `any` type". |
 | `.conductor/worker-rules.md` | Alternative name for worker rules (same effect as `rules.md`). |
 | `.conductor/flow-config.json` | Configure flow-tracing layers, actor types, edge cases, and example flows. See [Flow Configuration](#flow-configuration) below. |
+| `.conductor/design-spec.json` | Frontend design system spec: shared primitives, variant patterns, theming, naming conventions. Generated by `conduct init`, updated automatically after each cycle. |
+
+All three configurable files can be generated by `conduct init`. If they already exist, init writes alternatives to `.conductor/recommended-configs/` for manual comparison.
 
 ### Flow Configuration
 
@@ -319,6 +367,7 @@ src/
   performance-worker-prompt.ts  # Performance-tracing worker prompt
   core/
     orchestrator.ts             # Main conductor loop
+    init.ts                     # conduct init command logic
     planner.ts                  # Task decomposition + threat modeling
     worker-manager.ts           # Claude worker spawning + sentinel
     codex-worker-manager.ts     # Codex CLI worker spawning
@@ -341,6 +390,9 @@ src/
     sdk-timeout.ts              # Agent SDK query wrapper with timeout
     task-validator.ts            # Task definition validation (Zod)
     flow-config.ts              # Flow config loader + defaults
+    flow-config-generator.ts    # Framework-specific flow config templates
+    design-spec-analyzer.ts     # Frontend design system analysis agent
+    design-spec-updater.ts      # Post-cycle design spec updater
     conventions-extractor.ts    # Codebase pattern extraction
     rules-loader.ts             # Project rules loader
     semgrep-runner.ts           # Static analysis runner
@@ -395,7 +447,7 @@ Delete the `.conductor/` directory in your project and start a new run.
 
 ```bash
 npm run dev      # Watch mode
-npm test         # Run tests (vitest, 565 tests)
+npm test         # Run tests (vitest, 1000+ tests)
 npm run build    # Compile TypeScript
 npm run setup    # Install slash command
 ```
